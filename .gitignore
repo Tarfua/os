@@ -1,5 +1,7 @@
 /target/
 /os.img
+/os-bios.img
+/os-uefi.img
 *.log
 *.fd
 .env
