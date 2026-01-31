@@ -24,5 +24,14 @@ image-verbose:
 	@echo "Building disk image (verbose)..."
 	cargo build -p boot -vv
 
+# Run in default mode (UEFI)
 run: image
-	cargo run -p os --target x86_64-unknown-none
+	./run-qemu.sh uefi
+
+# Run in BIOS mode
+run-bios: image
+	./run-qemu.sh bios
+
+# Run in UEFI mode explicitly
+run-uefi: image
+	./run-qemu.sh uefi

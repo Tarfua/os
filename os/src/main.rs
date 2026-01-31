@@ -27,8 +27,15 @@ fn kernel_main(boot_info: &'static mut bootloader_api::BootInfo) -> ! {
 }
 
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    serial::write_str("KERNEL PANIC\n");
+fn panic(info: &PanicInfo) -> ! {
+    crate::serial::write_str("KERNEL PANIC: ");
+    if let Some(location) = info.location() {
+        crate::serial::write_fmt(format_args!(
+            "file={} line={}\n",
+            location.file(),
+            location.line()
+        ));
+    }
     loop {
         x86_64::instructions::hlt();
     }

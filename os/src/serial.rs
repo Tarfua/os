@@ -55,3 +55,10 @@ impl core::fmt::Write for Writer {
         Ok(())
     }
 }
+
+/// Write formatted string to serial (via Writer)
+pub fn write_fmt(args: core::fmt::Arguments) {
+    use core::fmt::Write; // import trait to make write_fmt available
+    let mut w = Writer;
+    let _ = w.write_fmt(args);
+}

@@ -5,4 +5,4 @@ edition = "2021"
 description = "Builds bootable disk image from kernel (Stage 1.1)"
 
 [build-dependencies]
-bootloader = { version = "0.11", default-features = false, features = ["bios"] }
+bootloader = { version = "0.11", default-features = false, features = ["bios", "uefi"] }

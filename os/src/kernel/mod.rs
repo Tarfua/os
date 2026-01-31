@@ -1,40 +1,56 @@
 use x86_64::instructions::interrupts;
+use crate::paging::PagingState;
+use bootloader_api::BootInfo;
+use crate::serial;         
 
 pub enum KernelInitError {
     PagingInitFailed,
 }
 
 pub struct KernelState {
-    pub paging: crate::paging::PagingState,
+    pub paging: PagingState,
+    pub boot_info: &'static BootInfo,
 }
 
 pub fn early_init(
-    boot_info: &'static bootloader_api::BootInfo,
+    boot_info: &'static BootInfo,
 ) -> Result<KernelState, KernelInitError> {
-    crate::serial::init();
-    crate::serial::write_str("Stage 1: kernel running\n");
+    serial::init();
+    serial::write_str("Stage 1: kernel running\n");
 
     if crate::long_mode::is_long_mode() {
-        crate::serial::write_str("64-bit long mode\n");
+        serial::write_str("64-bit long mode\n");
     } else {
-        crate::serial::write_str("NOT in long mode\n");
+        serial::write_str("NOT in long mode\n");
+    }
+
+    // Boot type detection
+    match &boot_info.framebuffer {
+        bootloader_api::info::Optional::Some(_) => {
+            serial::write_str("Boot type: UEFI\n");
+        }
+        bootloader_api::info::Optional::None => {
+            serial::write_str("Boot type: BIOS\n");
+        }
     }
 
     let paging = unsafe { crate::paging::init(boot_info) }
         .map_err(|_| KernelInitError::PagingInitFailed)?;
 
-    crate::serial::write_str("paging: init OK (bootloader tables)\n");
+    serial::write_str("paging: init OK (bootloader tables)\n");
 
-    // Initialize GDT, IDT, PIC, PIT
+    // GDT / IDT / PIC / PIT
     crate::gdt::init();
     crate::idt::init();
     crate::pic::init();
     crate::pit::init();
     interrupts::enable();
+    serial::write_str("IDT loaded; PIT 100 Hz; timer enabled\n");
 
-    crate::serial::write_str("IDT loaded; PIT 100 Hz; timer enabled\n");
-
-    Ok(KernelState { paging })
+    Ok(KernelState {
+        paging,
+        boot_info,
+    })
 }
 
 pub fn kernel_loop(_state: KernelState) -> ! {
