@@ -2,664 +2,1071 @@
 alwaysApply: true
 ---
 
-# Next-Generation General Purpose OS Architecture (Linux-Inspired, Clean-Slate Design)
+# Microkernel OS Architecture Specification
 
-## 1. Design Goals
+## Document Purpose
 
-1. Security-first by architecture, not add-ons  
-2. Strong isolation between components (fault & compromise containment)  
-3. High performance on servers *and* low-latency desktops  
-4. Hardware vendor–friendly driver model  
-5. Long-term maintainability (controlled complexity growth)  
-6. Backward compatibility with POSIX as a *layer*, not a constraint  
+This specification defines a next-generation general-purpose operating system with microkernel architecture. The design preserves Unix/Linux ecosystem compatibility while eliminating fundamental security and reliability weaknesses through architectural isolation, capability-based security, and modern memory safety.
 
 ---
 
-## 2. High-Level Architecture Overview
+## Part I: Architectural Principles
+
+### 1. Core Design Objectives
+
+**Security**: System security derives from architecture, not bolt-on mechanisms. Isolation and least privilege are structural properties.
+
+**Fault Isolation**: Component failures must not propagate. A crashed driver, filesystem, or network stack cannot compromise kernel integrity or other services.
+
+**Performance**: The system targets both high-throughput server workloads and low-latency interactive desktop use cases without compromise.
+
+**Hardware Ecosystem**: Driver model designed for long-term vendor support through stable ABIs and clear isolation boundaries.
+
+**Maintainability**: Complexity growth is controlled through explicit boundaries. Innovation occurs in replaceable user-space components, not kernel expansion.
+
+**Compatibility**: POSIX and Linux ABI support provided as optional service layers, not core constraints.
+
+---
+
+### 2. System Architecture Model
 
 ```
-+-----------------------------------------------------------+
-|                    User Applications                      |
-|  (POSIX layer, native apps, containers, runtimes)         |
-+---------------------------+-------------------------------+
-|        System Services    |     Compatibility Services    |
-| (FS mgr, net mgr, policy) | (POSIX, legacy Linux ABI)     |
-+---------------------------+-------------------------------+
-|        User-Space Drivers & Subsystems (Isolated)         |
-|  Filesystems | Network stacks | GPU | USB | Storage       |
-+---------------------------+-------------------------------+
-|            Microkernel Core (Minimal Trusted Base)        |
-|  Scheduler | IPC | Memory Mgmt | Capabilities | IOMMU     |
-+-----------------------------------------------------------+
-|                         Hardware                          |
-+-----------------------------------------------------------+
+┌─────────────────────────────────────────────────────────────┐
+│                    Application Layer                        │
+│  (POSIX apps, native binaries, containers, language runtimes)│
+├──────────────────────┬──────────────────────────────────────┤
+│   System Services    │      Compatibility Services          │
+│ (VFS, network mgr,   │   (POSIX syscall server,             │
+│  policy manager)     │    Linux ABI emulation)              │
+├──────────────────────┴──────────────────────────────────────┤
+│          User-Space Isolated Service Processes              │
+│  Filesystem servers | Network stacks | Device drivers       │
+│  GPU manager | USB stack | Storage controller | Audio       │
+├─────────────────────────────────────────────────────────────┤
+│             Microkernel (Minimal Trusted Core)              │
+│  Thread scheduler | Virtual memory | IPC mechanism          │
+│  Capability system | Interrupt routing | IOMMU control      │
+├─────────────────────────────────────────────────────────────┤
+│                         Hardware                            │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 3. Kernel Architecture
+### 3. Microkernel Responsibilities (Exhaustive List)
 
-### 3.1 Microkernel Core Responsibilities Only
+The kernel provides only fundamental mechanisms:
 
-The kernel must be **small, auditable, and stable**. It contains only:
+**Thread Execution**: Preemptive scheduling with priority inheritance and deadline scheduling support. Per-thread quantum management and CPU affinity control.
 
-- Thread scheduling (preemptive, priority & latency aware)
-- Virtual memory management (address spaces, mapping, paging)
-- Inter-process communication (fast, capability-checked IPC)
-- Capability-based security enforcement
-- Interrupt routing and basic hardware abstraction
-- IOMMU management for DMA isolation
+**Memory Management**: Virtual address space creation and destruction. Page table management. Physical frame allocation. Memory protection enforcement.
 
-Everything else runs outside the kernel.
+**Inter-Process Communication**: Synchronous message passing with capability transfer. Endpoint-based rendezvous. Zero-copy shared memory setup under strict access control.
 
-### 3.2 What Is Explicitly NOT in the Kernel
+**Security Enforcement**: Capability validation on every kernel operation. No operation proceeds without explicit capability authority.
 
-- Filesystem implementations  
-- Network protocol stacks  
-- Device drivers  
-- Graphics stacks  
-- USB/Bluetooth stacks  
+**Hardware Abstraction**: Interrupt delivery to appropriate user-space handlers. IOMMU configuration for DMA isolation. Basic platform initialization.
 
-These live in isolated user-space services.
+**Kernel Self-Management**: Internal synchronization primitives. Debug and trace facilities. Panic handling and error reporting.
 
 ---
 
-## 4. Security Model (Foundational)
+### 4. Explicit Kernel Exclusions
 
-### 4.1 No Global "root"
+The following functionality explicitly does not belong in kernel space:
 
-There is **no all-powerful superuser**.
+- File system implementations of any kind
+- Network protocol stacks (TCP/IP, UDP, routing)
+- Device drivers (block, character, network, graphics)
+- USB and Bluetooth stacks
+- Audio and video processing
+- Graphics rendering and compositing
+- Cryptographic operations (except capability token generation)
+- Policy enforcement beyond capability checks
+- Dynamic module loading beyond initial boot services
 
-Instead:
-- Every process runs with a set of **capabilities**
-- Capabilities are unforgeable tokens granting specific rights:
-  - Access to a device
-  - Ability to map memory
-  - Permission to talk to a service
-  - Network binding rights
-
-If a process does not have a capability, the operation is impossible.
-
-### 4.2 Capability Properties
-
-- Fine-grained (not “admin vs user”)
-- Delegatable (a process can pass limited rights to another)
-- Revocable (system can withdraw rights)
-- Namespaced (containers = capability subsets)
-
-### 4.3 Mandatory Isolation by Default
-
-- Every service runs in its own address space
-- Drivers cannot access arbitrary memory
-- Filesystem services cannot access raw devices without explicit capability
-- Network stacks cannot read files unless granted
+These execute as isolated user-space server processes.
 
 ---
 
-## 5. Driver Model
+### 5. Security Architecture
 
-### 5.1 Drivers Run in User Space
+#### 5.1 Capability-Based Security Model
 
-All drivers are isolated processes:
+**No Global Root Authority**: The system has no superuser or administrator with unrestricted access.
 
-- One driver crash ≠ system crash
-- Compromised driver cannot directly own the kernel
-- Drivers communicate with the kernel via IPC
+**Capability Definition**: A capability is an unforgeable token representing permission to perform a specific operation on a specific kernel object.
 
-### 5.2 Hardware Access Rules
+**Capability Types**:
+- Thread capabilities: control thread lifecycle and scheduling parameters
+- AddressSpace capabilities: control memory mappings
+- Endpoint capabilities: enable IPC communication
+- IRQ capabilities: receive hardware interrupt notifications
+- Memory capabilities: grant access to specific physical or device memory regions
+- Port capabilities: access hardware I/O ports
 
-- DMA only via IOMMU mappings explicitly granted
-- No direct physical memory access outside assigned regions
-- Interrupts delivered to driver processes through kernel mediation
+**Capability Properties**:
+- Unforgeable: cannot be created or guessed, only granted by kernel or delegation
+- Fine-grained: each capability grants minimal necessary authority
+- Transferable: can be sent to other processes via IPC
+- Revocable: issuing authority can invalidate capabilities
+- Inspectable: processes can query their own capability set
 
-### 5.3 Stable Driver ABI
+#### 5.2 Isolation Guarantees
 
-The OS provides:
+**Address Space Isolation**: Every user-space process executes in a separate address space. Memory cannot be accessed without explicit capability.
 
-- Versioned, stable driver interface
-- Long-term binary compatibility for drivers
-- Strict interface boundaries to prevent kernel coupling
+**Service Isolation**: Filesystem servers cannot access raw block devices without block device capability. Network stacks cannot access filesystem data without explicit file capability.
 
-This encourages hardware vendor support.
+**Driver Containment**: Device drivers execute with access only to assigned hardware resources. A compromised driver cannot access other devices or system memory.
 
----
-
-## 6. Filesystem Architecture
-
-### 6.1 Filesystems as Services
-
-Each filesystem is a separate user-space server:
-
-- Local FS (e.g., modern CoW FS)
-- Network FS
-- Encrypted FS layers
-
-They expose a unified VFS protocol to the system.
-
-### 6.2 Structured Kernel Interface (No Text Pseudo-Files)
-
-No `/proc` or `/sys` text parsing.
-
-Instead:
-- Typed system calls
-- Structured queries
-- Versioned object models
+**Failure Domains**: Service crash or compromise is contained to that service. System provides mechanisms to detect failures and restart services without global impact.
 
 ---
 
-## 7. Networking Architecture
+### 6. Driver Architecture
 
-### 7.1 Network Stacks in User Space
+#### 6.1 User-Space Driver Model
 
-- Multiple network stacks can coexist (performance vs security variants)
-- Crashes in network code do not crash the kernel
-- Sandboxed protocol implementations
+**Isolation**: Each driver runs as a separate user-space process with minimal privileges.
 
-### 7.2 Secure by Default
+**Failure Handling**: Driver crashes do not crash the kernel. System can detect and restart failed drivers while maintaining device state where possible.
 
-- Raw packet access requires explicit capability
-- Network services run with minimal privileges
-- Fine-grained firewalling integrated with capability model
+**Hardware Access Control**:
+- DMA operations require IOMMU mappings explicitly granted via capability
+- Memory-mapped I/O regions exposed only through capability-controlled mappings
+- I/O port access granted per-port via capability
+- Interrupt delivery routed to driver via capability-checked endpoint
 
----
+#### 6.2 Driver Interface Stability
 
-## 8. Process & IPC Model
+**Stable Binary ABI**: Driver interface is versioned and maintains backward compatibility across kernel updates.
 
-### 8.1 IPC Is the Core Primitive
+**Interface Guarantees**:
+- IPC protocols for driver-kernel communication are stable
+- Hardware abstraction structures maintain binary compatibility
+- Capability types and semantics do not change within major versions
 
-Everything is a service accessed via IPC:
-
-- Filesystem operations
-- Device control
-- Network communication
-- System management
-
-IPC must be:
-- Fast (shared memory + message passing)
-- Capability-checked
-- Observable for debugging
-
-### 8.2 Service-Oriented OS
-
-The OS behaves like a set of cooperating, isolated services rather than a monolithic blob.
+**Vendor Support**: Stable ABI enables hardware vendors to ship binary drivers with long-term support commitments.
 
 ---
 
-## 9. Scheduling & Performance
+### 7. Filesystem Architecture
 
-### 9.1 Latency-Aware Scheduler
+#### 7.1 Filesystem as Service
 
-Scheduler designed for:
+**Service Model**: Each filesystem implementation runs as an isolated user-space server process.
 
-- Low-latency UI threads
-- Real-time audio/video
-- VR/AR workloads
-- Traditional server throughput
+**Multiple Instances**: Different filesystems for different purposes:
+- Local persistent filesystems (ext4-like, copy-on-write, log-structured)
+- Network filesystems (NFS, SMB client implementations)
+- Special-purpose filesystems (encrypted overlay, union, RAM)
 
-Priority inheritance and deadline scheduling are first-class.
+**VFS Protocol**: All filesystem servers expose a common typed interface for file operations. This replaces text-based pseudo-filesystems with structured queries.
 
-### 9.2 Performance Strategy
+#### 7.2 Structured System Interface
 
-- Critical paths optimized with shared memory IPC
-- Zero-copy data paths where safe
-- User-space drivers allowed with fast kernel bypass mechanisms under strict control
+**No Text Pseudo-Files**: The system does not use `/proc` or `/sys` style text-based configuration.
 
----
+**Typed System Calls**: System queries return structured data with explicit versioning.
 
-## 10. Memory Safety Strategy
-
-### 10.1 Safe Languages by Default
-
-- Kernel written in a memory-safe systems language (e.g., Rust-like)
-- Drivers strongly encouraged or required to use safe languages
-- Unsafe code isolated and audited
-
-### 10.2 Containing Unsafe Components
-
-If unsafe code exists:
-- It runs in isolated processes
-- Damage is limited by capabilities and memory boundaries
+**Backward Compatibility**: Old application versions work because server maintains support for old interface versions.
 
 ---
 
-## 11. Compatibility Layers
+### 8. Network Architecture
 
-### 11.1 POSIX Compatibility as a Service
+#### 8.1 Network Stack Isolation
 
-A dedicated compatibility layer provides:
+**User-Space Stacks**: All network protocol implementations run in user space.
 
-- POSIX syscalls
-- Traditional process model
-- Signals, fork/exec semantics
+**Multiple Stacks**: Different stacks optimized for different requirements:
+- High-security stack with extensive validation
+- High-performance stack with kernel bypass for trusted applications
+- Compatibility stack for legacy protocol support
 
-Internally, these map to the new kernel primitives.
+**Stack Replacement**: Network stacks are replaceable without kernel changes or system reboot.
 
-### 11.2 Legacy Linux ABI Layer (Optional)
+#### 8.2 Network Security
 
-A containerized compatibility subsystem may run:
+**Capability-Controlled Access**: Raw packet access requires explicit capability. Applications cannot sniff traffic without authority.
 
-- Recompiled Linux binaries
-- Legacy software stacks
+**Socket Service**: User-facing socket API provided by a socket server that mediates between applications and network stacks.
 
-Without polluting the core architecture.
-
----
-
-## 12. System Management Philosophy
-
-- Core kernel: minimal, rarely changing, highly verified
-- Most innovation happens in replaceable user-space services
-- System components can be restarted independently
-- Observability and introspection built into IPC and capability systems
+**Firewall Integration**: Packet filtering implemented in user-space with capability checks. No application sends or receives packets without appropriate capabilities.
 
 ---
 
-## 13. Development & Testing Strategy (QEMU-Centric)
+### 9. Inter-Process Communication Model
 
-### 13.1 Primary Test Platform: QEMU
+#### 9.1 IPC as Core Mechanism
 
-QEMU is the main development environment from the first boot instruction to a multi-service OS.
+**Universal Communication**: All service access occurs via IPC. File operations, device control, network operations, and system management all use the same IPC primitives.
 
-**Why QEMU is critical:**
-- Hardware-independent early bring-up
-- Full system emulation (CPU, memory, interrupts, devices)
-- GDB remote debugging of kernel code
-- Snapshotting and deterministic test setups
-- CI-friendly automated boot testing
+**IPC Operations**:
+- Synchronous send and receive with blocking semantics
+- Asynchronous notification via capability-granted endpoints
+- Shared memory region establishment under mutual consent
 
-### 13.2 Early Boot Workflow
+**IPC Performance**:
+- Optimized fast path for small message passing
+- Zero-copy transfer for bulk data via shared memory mapping
+- Capability transfer in single IPC transaction
 
-1. UEFI firmware (OVMF) used with QEMU  
-2. Kernel loaded as an EFI application or via custom bootloader  
-3. Serial output (`-serial stdio`) used as the primary debug channel  
+#### 9.2 Service Discovery and Naming
 
-Example launch pattern:
+**No Global Namespace**: Services are not identified by string names in a global directory.
 
+**Capability-Based Discovery**: Initial process receives capabilities to essential services. Additional service discovery occurs through queries to trusted service directory with capability proof.
+
+---
+
+### 10. Scheduling and Performance
+
+#### 10.1 Scheduler Design
+
+**Multiple Scheduling Classes**:
+- Real-time: deadline-based scheduling for hard real-time requirements
+- Interactive: low-latency scheduling for UI responsiveness
+- Throughput: fair scheduling for batch and server workloads
+
+**Scheduler Features**:
+- Priority inheritance to prevent priority inversion
+- CPU affinity control for cache optimization
+- Gang scheduling for tightly coupled thread groups
+
+#### 10.2 Performance Optimization Strategy
+
+**Fast Paths**: Critical IPC paths optimized for common case with minimal kernel processing.
+
+**Kernel Bypass**: Trusted applications can use shared memory for data plane operations while control plane remains capability-checked.
+
+**NUMA Awareness**: Scheduler and memory allocator consider NUMA topology for large systems.
+
+**Power Management**: Scheduler cooperates with power management to balance performance and energy efficiency.
+
+---
+
+### 11. Memory Safety Strategy
+
+#### 11.1 Safe Language Implementation
+
+**Rust-Based Kernel**: Kernel implemented in Rust to eliminate entire classes of memory safety vulnerabilities.
+
+**Safety Benefits**:
+- No buffer overflows or underflows
+- No use-after-free errors
+- No data races in kernel code
+- Type system enforces initialization and lifetime rules
+
+**Unsafe Code Management**:
+- Unsafe Rust limited to well-defined hardware interaction boundaries
+- Unsafe blocks explicitly audited and documented
+- Assembly limited to architecture-specific boot and context switch code
+
+#### 11.2 User-Space Memory Safety
+
+**Driver Requirements**: New drivers strongly encouraged to use memory-safe languages. Rust driver framework provided.
+
+**Legacy Driver Support**: Drivers in unsafe languages run in isolated processes where memory corruption impact is contained.
+
+**Validation**: Unsafe drivers subject to additional runtime validation and address space restriction.
+
+---
+
+### 12. Compatibility Layer Design
+
+#### 12.1 POSIX Compatibility Service
+
+**Implementation**: POSIX API provided by user-space service, not kernel.
+
+**POSIX Features**:
+- Standard syscall interface (open, read, write, fork, exec, etc.)
+- Process model with signals
+- File descriptors and I/O redirection
+- Pipes and FIFOs
+- Standard error semantics
+
+**Internal Mapping**: POSIX server translates traditional operations to native capability and IPC mechanisms.
+
+#### 12.2 Linux ABI Compatibility
+
+**Binary Compatibility**: Optional subsystem provides Linux syscall ABI for unmodified Linux binaries.
+
+**Implementation**: Containerized Linux personality with syscall translation layer.
+
+**Use Cases**: Legacy application support during transition period. Not intended as permanent architecture.
+
+---
+
+### 13. System Composition Philosophy
+
+**Minimal Kernel**: Kernel size measured in tens of thousands of lines, not millions. Small enough for formal verification efforts.
+
+**Replaceable Services**: System services can be updated, replaced, or specialized without kernel changes.
+
+**Independent Restart**: Failed services restart without affecting other components or requiring system reboot.
+
+**Observability**: All IPC is observable. Capability flow is traceable. System behavior is introspectable.
+
+---
+
+## Part II: Development Roadmap
+
+### Development Environment and Methodology
+
+#### Primary Development Platform: QEMU
+
+**Rationale**: QEMU provides complete system emulation enabling development without physical hardware dependencies.
+
+**QEMU Capabilities Used**:
+- Full x86_64 CPU emulation with modern extensions
+- UEFI firmware (OVMF) for realistic boot environment
+- Device emulation for drivers (serial, storage, network)
+- GDB remote debugging protocol for kernel debugging
+- Snapshot and restore for deterministic testing
+
+**Standard Development Command**:
 ```
 qemu-system-x86_64 \
   -machine q35 \
   -cpu qemu64 \
-  -m 512M \
+  -m 2G \
   -serial stdio \
   -drive if=pflash,format=raw,readonly=on,file=OVMF_CODE.fd \
-  -drive format=raw,file=os.img
+  -drive format=raw,file=boot.img \
+  -s -S
 ```
 
-### 13.3 Kernel Debugging
+#### Debugging Methodology
 
-QEMU supports source-level kernel debugging:
+**Serial Output**: Primary debug output via serial port, captured to stdio.
 
-```
-qemu-system-x86_64 -s -S ...
-```
+**GDB Integration**:
+- `-s` flag opens GDB server on port 1234
+- `-S` flag halts CPU at startup for early debugging
+- Source-level debugging of all kernel code
+- Hardware breakpoint and watchpoint support
 
-- `-S` pauses CPU at startup  
-- `-s` opens a GDB server on port 1234  
+**Debug Workflow**:
+- Set breakpoints in memory manager, scheduler, IPC handler
+- Single-step through critical kernel paths
+- Inspect data structures and register state
+- Validate invariants at runtime
 
-This allows:
-- Breakpoints in kernel code  
-- Step-by-step execution  
-- Register and memory inspection  
+#### Testing Strategy
 
-This is essential during:
-- Memory manager bring-up  
-- Scheduler debugging  
-- IPC correctness validation  
+**Automated Boot Testing**: QEMU instances boot OS, execute test service, report results via serial output.
 
-### 13.4 Automated Testing
+**Test Categories**:
+- Unit tests: IPC semantics, capability enforcement, memory isolation
+- Integration tests: Service interaction, filesystem operations, network communication
+- Stress tests: Scheduler fairness, memory pressure, IPC throughput
+- Regression tests: Previously fixed bugs remain fixed
 
-QEMU instances can be scripted to:
-- Boot the OS
-- Run a test service
-- Report success via serial output
-
-This enables regression testing of:
-- IPC semantics
-- Capability enforcement
-- Scheduler fairness
-- Memory isolation
+**Continuous Integration**: Every commit boots in QEMU and executes test suite.
 
 ---
 
-## 14. Microkernel Development Roadmap
+### Stage 1: Boot and Hardware Initialization
 
-### Stage 1 — Bare-Metal Kernel Skeleton
+**Objective**: Establish execution environment capable of running kernel code.
 
-Goal: Reach a stable execution environment.
+**Components**:
 
-Components:
-- UEFI boot
-- Long mode setup
-- Interrupt descriptor table
-- Basic physical and virtual memory mapping
-- Serial debug output
+**UEFI Boot Loader**:
+- UEFI application entry point
+- Load kernel image into memory
+- Construct memory map from UEFI
+- Exit boot services and transfer control to kernel
 
-Result: Kernel runs and handles timer interrupts.
+**Long Mode Setup**:
+- Enable 64-bit execution mode
+- Establish initial page tables with higher-half mapping
+- Identity map low memory for boot process
+- Set up kernel code and data segments
 
----
+**Interrupt Infrastructure**:
+- Initialize Interrupt Descriptor Table with null handlers
+- Configure timer interrupt for basic time reference
+- Install panic handler for unexpected interrupts
 
-### Stage 2 — Core Kernel Mechanisms
+**Early Output**:
+- Initialize serial port for debug output
+- Implement basic string formatting
+- Provide kernel logging macros
 
-Goal: Build a minimal but correct microkernel core with strong isolation, preemptive multitasking, and controlled inter-process communication.
+**Memory Discovery**:
+- Parse UEFI memory map
+- Identify usable physical memory regions
+- Mark reserved regions (UEFI runtime, hardware MMIO)
 
-This stage is intentionally split into three sub-stages to avoid architectural coupling and uncontrolled complexity growth.
-
----
-
-## Stage 2A — Execution & Isolation Primitives
-
-Goal: Establish fundamental execution units and memory isolation without introducing scheduling policy or IPC.
-
-### Components
-
-#### Address Space Abstraction
-- Introduce `AddressSpace` as a first-class kernel object.
-- Each address space owns exactly one root page table (PML4).
-- Kernel space is mapped into all address spaces (higher-half mapping).
-- User space mappings are fully isolated per address space.
-
-Constraints:
-- No shared user mappings.
-- No lazy mapping or copy-on-write.
-- No demand paging.
-
-Result:
-- Kernel can create, destroy, and switch address spaces safely.
+**Success Criteria**: Kernel boots, prints "Kernel initialized" to serial console, handles timer interrupts without crashing.
 
 ---
 
-#### Thread Abstraction
-- Introduce `Thread` as the minimal execution unit.
-- A thread consists of:
-  - CPU register context
-  - Kernel stack
-  - Associated address space
-- Threads are independent of scheduling policy.
+### Stage 2A: Memory Management Foundation
 
-Constraints:
-- No priorities.
-- No signals.
-- No TLS.
-- No user-visible thread API.
+**Objective**: Implement fundamental memory allocation and virtual memory mechanisms without involving scheduling or IPC.
 
-Result:
-- Kernel can create threads bound to specific address spaces.
+**Components**:
 
----
+**Physical Memory Allocator**:
+- Frame allocator managing physical memory pages
+- Bitmap or buddy allocator for tracking free frames
+- Support for page-aligned allocations
+- Statistics tracking (total, used, free frames)
 
-#### Context Switching
-- Implement low-level context switch routine.
-- Switching includes:
-  - Saving/restoring CPU registers
-  - Switching CR3
-  - Correct return via `iretq`
+**Virtual Memory Primitives**:
+- Page table manipulation functions (map, unmap, remap)
+- Support for different page sizes (4KiB, 2MiB, 1GiB)
+- Cache and permission attribute setting
+- Page table walk and address resolution
 
-Constraints:
-- No scheduler logic inside context switch.
-- No preemption logic.
+**AddressSpace Abstraction**:
+- AddressSpace as kernel object encapsulating page table root
+- Per-address-space metadata (name, statistics, capability list)
+- Creation and destruction operations
+- Address space switching function
 
-Result:
-- Kernel can explicitly switch execution between threads.
+**Kernel Heap Allocator**:
+- Dynamic memory allocation for kernel data structures
+- Built on top of physical frame allocator
+- Support for variable-size allocations
+- Alignment requirements handling
 
----
+**Isolation Verification**:
+- User address spaces cannot map kernel memory
+- User address spaces cannot map other user address spaces
+- Kernel maintains read-only mapping of all user memory for IPC data copy
 
-### Stage 2A Result
-- Multiple threads exist.
-- Each thread executes in its own address space.
-- Manual context switching is functional and stable.
+**Explicit Exclusions**:
+- No demand paging or page fault handling
+- No copy-on-write
+- No shared memory between address spaces
+- No swapping or memory overcommit
 
----
-
-## Stage 2B — Scheduling & Time
-
-Goal: Introduce preemptive multitasking driven by timer interrupts, without IPC or high-level policies.
-
-### Components
-
-#### Thread States
-- Define thread lifecycle states:
-  - Runnable
-  - Running
-  - Blocked
-  - Dead
-
-Constraints:
-- Blocked state has no reason attached.
-- No sleeping or timeouts.
+**Success Criteria**: Kernel allocates multiple isolated address spaces, switches between them without corruption, and maintains separate mapping state.
 
 ---
 
-#### Scheduler Core
-- Implement a minimal preemptive scheduler.
-- Single run queue.
-- Round-robin scheduling.
-- One CPU only (no SMP support).
+### Stage 2B: Thread Execution and Scheduling
 
-Constraints:
-- No priorities.
-- No load balancing.
-- No per-core queues.
+**Objective**: Enable preemptive multitasking with timer-driven scheduling. No communication between threads yet.
 
----
+**Components**:
 
-#### Timer-Driven Preemption
-- Use hardware timer interrupt to trigger scheduling.
-- Timer interrupt handler must:
-  - Save current thread state
-  - Invoke scheduler
-  - Switch to next runnable thread
+**Thread Abstraction**:
+- Thread structure containing register context, stack pointers, and execution state
+- Association with specific AddressSpace
+- Per-thread kernel stack
+- Thread identifier and metadata
 
----
+**Thread States**:
+- Running: currently executing on CPU
+- Runnable: ready to execute, waiting for CPU
+- Blocked: waiting for event (used in next stage)
+- Dead: terminated and awaiting cleanup
 
-#### Preemption Control
-- Introduce per-CPU preemption disable counter.
-- Kernel critical sections must explicitly disable preemption.
-- Interrupt disable is not a substitute for scheduler locking.
+**Context Switch Mechanism**:
+- Save full CPU register state (general purpose, stack pointer, instruction pointer)
+- Restore register state for next thread
+- Page table switch when crossing address space boundary
+- Return to user mode via `iretq` or equivalent
 
-Constraints:
-- No fine-grained locking model yet.
+**Scheduler Core**:
+- Single run queue holding all runnable threads
+- Round-robin scheduling policy with configurable quantum
+- Select next thread when current quantum expires or thread yields
+- Handle thread state transitions
 
----
+**Timer Integration**:
+- Configure hardware timer for periodic interrupts
+- Timer interrupt handler invokes scheduler
+- Preempt running thread and switch to next runnable
 
-### Stage 2B Result
-- Threads are preempted by timer interrupts.
-- Kernel executes multiple threads safely.
-- Scheduler is isolated from IPC and resource management logic.
+**Preemption Control**:
+- Kernel critical sections can disable preemption
+- Preemption disabled counter per CPU
+- Scheduler defers decisions until preemption re-enabled
 
----
+**Explicit Exclusions**:
+- No priority levels
+- No real-time scheduling
+- No SMP (single CPU only)
+- No thread sleep or wakeup (no blocking primitives)
+- No thread-local storage
 
-## Stage 2C — IPC & Capability Core
-
-Goal: Enable controlled communication and authority transfer between isolated execution contexts.
-
-### Components
-
-#### IPC Model
-- Implement synchronous, blocking message passing.
-- IPC operations:
-  - `send(endpoint, message)`
-  - `recv(endpoint)`
-
-Constraints:
-- No asynchronous IPC.
-- No message queues.
-- One sender and one receiver per endpoint.
+**Success Criteria**: Multiple threads execute in rotation, each in isolated address space. Threads preempted by timer demonstrate fair CPU sharing.
 
 ---
 
-#### IPC Messages
-- Messages consist of:
-  - Fixed-size word payload
-  - Optional capability transfers
+### Stage 2C: IPC and Capability Foundation
 
-Constraints:
-- No variable-sized messages.
-- No shared memory payloads.
+**Objective**: Enable controlled communication and authority transfer between isolated processes.
+
+**Components**:
+
+**Endpoint Object**:
+- Kernel object representing IPC rendezvous point
+- Holds at most one waiting sender and one waiting receiver
+- Manages thread blocking and wakeup on IPC match
+
+**IPC Message Structure**:
+- Fixed-size payload (eight 64-bit words)
+- Inline capability transfer slots (up to four capabilities per message)
+- No variable-length data or shared memory in initial implementation
+
+**IPC Operations**:
+
+**Send Operation**:
+- Caller specifies endpoint capability, message data, and capabilities to transfer
+- If receiver waiting: deliver immediately, unblock receiver, transfer capabilities
+- If no receiver: block sender until receiver arrives
+
+**Receive Operation**:
+- Caller specifies endpoint capability to receive from
+- If sender waiting: extract message, unblock sender, receive transferred capabilities
+- If no sender: block receiver until sender arrives
+
+**Thread Blocking Integration**:
+- Sending thread enters Blocked state when no receiver
+- Receiving thread enters Blocked state when no sender
+- Matched send/receive operations atomically unblock both parties
+
+**Capability System**:
+
+**Capability Types**:
+- Thread: control thread execution and query state
+- AddressSpace: control memory mappings
+- Endpoint: send and receive IPC messages
+- IRQ (placeholder for future): receive interrupt notifications
+
+**Capability Storage**:
+- Per-thread capability table indexed by integer capability identifiers
+- Kernel validates capability index and type on every operation
+- Invalid capability index or type mismatch causes operation failure
+
+**Capability Transfer**:
+- Capabilities embedded in IPC messages
+- Sender includes capability in outgoing message
+- Receiver gains new capability in its capability table
+- Original sender retains capability (copy semantics)
+
+**Capability Operations**:
+- Acquire: receive capability via IPC
+- Drop: release capability from capability table
+- Inspect: query capability type (future: query authority level)
+
+**Security Properties**:
+- No ambient authority: operations require explicit capability
+- Capability unforgeable: cannot be created outside kernel control
+- Least privilege: each thread holds only necessary capabilities
+
+**Explicit Exclusions**:
+- No asynchronous IPC or notification mechanisms
+- No shared memory establishment
+- No capability revocation or delegation hierarchy
+- No capability grant (only transfer via IPC)
+- No variable-length message payloads
+
+**Success Criteria**: Two processes communicate via IPC. Sender transfers endpoint capability to receiver. Receiver uses transferred capability to communicate with third process.
 
 ---
 
-#### Endpoint Object
-- Introduce `Endpoint` as an IPC rendezvous point.
-- Endpoint holds:
-  - At most one waiting sender
-  - At most one waiting receiver
+### Stage 2 Summary
 
-Constraints:
-- One-to-one communication only.
-- No broadcast or multicast.
+At completion of Stage 2:
 
----
+**Kernel Provides**:
+- Isolated address spaces with independent virtual memory
+- Preemptive thread scheduling with fair CPU sharing
+- Synchronous IPC as sole inter-process communication mechanism
+- Capability-based access control on all kernel operations
 
-#### Thread Blocking Semantics
-- IPC operations directly manipulate thread states:
-  - Sending thread blocks if no receiver.
-  - Receiving thread blocks if no sender.
-  - Successful match unblocks both.
-
----
-
-#### Capability System (Initial Version)
-- Introduce typed capabilities as unforgeable kernel references.
-- Supported capability types:
-  - Thread
-  - AddressSpace
-  - Endpoint
-
-Constraints:
-- No capability copying.
-- No revocation.
-- No delegation hierarchy.
-- Capabilities can only be transferred via IPC.
-
----
-
-### Stage 2C Result
-- Multiple isolated processes communicate exclusively via IPC.
-- Authority is explicitly represented and transferred.
-- Kernel has no ambient authority outside capabilities.
-
----
-
-## Overall Stage 2 Result
-
-- Fully isolated address spaces.
-- Preemptive multitasking.
-- Synchronous IPC as the sole communication mechanism.
-- Minimal capability-based security model.
-
-Out of Scope:
-- Shared memory
-- Filesystems
-- Drivers
-- SMP
+**What Remains For Later Stages**:
+- Shared memory for bulk data transfer
+- Asynchronous notifications
+- Filesystem services
+- Device drivers
+- Network stacks
+- SMP support
 - Advanced scheduling policies
-- Capability revocation
+- Capability revocation and hierarchical delegation
 
-This stage establishes a clean, minimal microkernel foundation suitable for controlled extension in later stages.
-
-
----
-
-### Stage 3 — Capability Enforcement
-
-Goal: Security model becomes real.
-
-Components:
-- Capability objects in kernel
-- Per-process capability spaces
-- Capability transfer via IPC
-- Access checks on all kernel operations
-
-Result: No operation without explicit authority.
+This foundation is minimal, correct, and sufficient for building complete OS services in user space.
 
 ---
 
-### Stage 4 — First User-Space System Services
+### Stage 3: Shared Memory and Zero-Copy IPC
 
-Goal: Move policy out of kernel.
+**Objective**: Enable efficient bulk data transfer between processes while maintaining isolation guarantees.
 
-Services:
-- Root system service (process spawning and capability distribution)
-- Memory management policy service
-- Logging/console service
+**Components**:
 
-Result: Kernel only provides mechanisms; services define behavior.
+**Shared Memory Regions**:
+- Kernel object representing memory region accessible to multiple address spaces
+- Created by explicit process request with size and access permissions
+- Memory allocated from physical frames on creation
 
----
+**Mapping Protocol**:
+- Process A creates shared memory region with specified size
+- Process A receives capability to shared memory object
+- Process A transfers capability to Process B via IPC
+- Process B maps shared memory into its address space at chosen virtual address
+- Both processes access same physical memory
 
-### Stage 5 — User-Space Driver Framework
+**Access Control**:
+- Shared memory capability specifies permissions (read-only, read-write)
+- Kernel enforces permissions on mapping operation
+- Process cannot escalate privileges on shared memory region
 
-Goal: Hardware access without kernel bloat.
+**Lifecycle Management**:
+- Shared memory persists while any capability exists
+- Last capability release triggers memory deallocation
+- Explicit unmap operation removes mapping from address space
 
-Components:
-- Interrupt delivery to user space
-- IOMMU-backed DMA isolation
-- Driver IPC interfaces
+**Zero-Copy IPC Pattern**:
+- Sender allocates shared memory, writes data
+- Sender sends small IPC message with shared memory capability
+- Receiver maps shared memory, reads data
+- Receiver unmaps when done, drops capability
 
-First drivers:
-- Serial
-- Timer
-- RAM-backed block device
-
-Result: Drivers can crash without crashing the system.
-
----
-
-### Stage 6 — Filesystem Service
-
-Goal: Persistent storage outside the kernel.
-
-Components:
-- VFS protocol over IPC
-- RAM filesystem
-- Block device integration
-
-Result: Files are managed entirely in user space.
+**Success Criteria**: Large data transfer (megabytes) between processes completes with minimal kernel involvement. Memory isolation verified: corrupting shared region does not affect process private memory.
 
 ---
 
-### Stage 7 — Networking Stack
+### Stage 4: System Services Foundation
 
-Goal: Safe and replaceable networking.
+**Objective**: Establish core user-space services that provide system-wide functionality.
 
-Components:
-- NIC driver in user space
-- User-space TCP/IP stack
-- Capability-controlled socket service
+**Components**:
 
-Result: Network failures do not compromise kernel stability.
+**Root Service**:
+- First user-space process started by kernel
+- Receives capabilities to all system resources
+- Responsible for starting other system services
+- Distributes capabilities according to system policy
+
+**Process Manager Service**:
+- Handles process creation and termination
+- Manages process hierarchy and parent-child relationships
+- Provides process enumeration and query interface
+- Enforces resource limits and quotas
+
+**Memory Manager Service**:
+- Implements memory allocation policy
+- Provides malloc/free equivalent for processes
+- Manages backed memory (file-mapped pages)
+- Tracks system-wide memory usage
+
+**Capability Manager Service**:
+- Maintains capability namespace
+- Implements capability revocation
+- Enables capability delegation with restrictions
+- Provides capability audit and introspection
+
+**Name Service**:
+- Maps human-readable names to endpoint capabilities
+- Allows service discovery by name
+- Enforces access control on name registration and lookup
+- Replaces global namespace with capability-controlled directory
+
+**Success Criteria**: Process creation goes through Process Manager. Memory allocation requests handled by Memory Manager. Services discover each other via Name Service.
 
 ---
 
-### Stage 8 — POSIX Compatibility Layer
+### Stage 5: Interrupt Handling and Driver Framework
 
-Goal: Practical software ecosystem support.
+**Objective**: Enable hardware interaction through isolated user-space drivers.
 
-Components:
-- POSIX syscall translation service
-- Process model emulation
-- Filesystem and socket mapping to native services
+**Components**:
 
-Result: Unix-style applications run without polluting kernel design.
+**Interrupt Delivery**:
+- Hardware interrupts generate IRQ events
+- Kernel identifies process registered for IRQ
+- Kernel sends IPC message to driver process notifying of interrupt
+- Driver process handles interrupt, returns to waiting state
+
+**IRQ Capability**:
+- Driver receives IRQ capability during initialization
+- IRQ capability grants right to receive interrupt notifications
+- Multiple drivers cannot share same IRQ without explicit coordination
+
+**IOMMU Integration**:
+- Kernel configures IOMMU to restrict DMA to permitted memory regions
+- Driver receives memory capability specifying DMA-accessible region
+- Hardware can only DMA to/from designated region
+- Memory outside region protected from device access
+
+**Driver Initialization Protocol**:
+- Root service starts driver process
+- Driver registers with device manager
+- Device manager grants driver capabilities: MMIO region, IRQ, DMA memory
+- Driver configures hardware and enters event loop
+
+**Driver Event Loop Pattern**:
+- Wait for IPC message (interrupt notification or control command)
+- Process event
+- Respond if necessary
+- Return to waiting
+
+**First Reference Drivers**:
+- Serial driver: character device using interrupt-driven I/O
+- Timer driver: periodic interrupt generation for time-of-day
+- RAM disk driver: block device backed by memory
+
+**Success Criteria**: Serial driver receives interrupts from hardware, delivers characters to console service. Driver crash does not crash kernel. Restarted driver successfully resumes operation.
 
 ---
 
-## 15. Summary Philosophy
+### Stage 6: Filesystem Service
 
-This system keeps from Linux:
+**Objective**: Provide persistent storage abstraction entirely in user space.
 
-- Unix process model (via compatibility)
-- File and socket abstractions
-- Open ecosystem and modularity
+**Components**:
 
-But fixes at the root:
+**VFS Protocol**:
+- Typed IPC interface for filesystem operations
+- Operations: open, close, read, write, seek, stat, readdir
+- Path resolution and directory traversal
+- File handle representation via capabilities
 
-- No monolithic trusted driver code
-- No global superuser
-- No text-based kernel control hacks
-- No assumption that hardware or drivers are trustworthy
+**RAM Filesystem Implementation**:
+- In-memory filesystem for testing and temporary storage
+- Directory tree stored in process memory
+- File data stored in allocated memory
+- No persistence across restarts
 
-It is designed for a world where:
-- Devices are hostile
-- Isolation is mandatory
-- Security and reliability outrank historical convenience
+**Block Device Integration**:
+- Filesystem server receives capability to block device driver endpoint
+- Read and write requests sent to block device via IPC
+- Block device returns data via shared memory
+
+**Persistent Filesystem**:
+- Simple on-disk format (similar to ext2)
+- Inode-based structure with directory and data blocks
+- Metadata stored in fixed locations
+- Crash recovery through journaling or fsck equivalent
+
+**Mount Protocol**:
+- VFS service manages multiple filesystem instances
+- Applications send requests to VFS
+- VFS forwards to appropriate filesystem implementation
+- Transparent access to different storage backends
+
+**Success Criteria**: Application creates file, writes data, closes file. Second application opens same file, reads back data. Filesystem server restart preserves existing file data.
+
+---
+
+### Stage 7: Network Stack
+
+**Objective**: Provide network communication through isolated user-space protocol stack.
+
+**Components**:
+
+**NIC Driver**:
+- User-space driver for network interface card
+- Receives packet buffers from NIC via DMA
+- Delivers received packets to network stack via IPC
+- Transmits packets from network stack to NIC
+
+**Protocol Stack Implementation**:
+- User-space TCP/IP stack (port of lwIP or custom implementation)
+- Handles Ethernet, IP, ICMP, UDP, TCP protocols
+- Maintains connection state and routing tables
+- Runs as isolated service process
+
+**Socket Service**:
+- Provides BSD socket API to applications
+- Translates socket calls to IPC messages to protocol stack
+- Manages file descriptor namespace for sockets
+- Enforces network access policy via capabilities
+
+**Capability-Controlled Access**:
+- Network transmit capability required to send packets
+- Network receive capability required to receive packets
+- Port binding capability required to listen on port
+- Raw socket capability tightly restricted
+
+**Zero-Copy Packet Path**:
+- NIC driver and protocol stack share packet buffers
+- Application and protocol stack share send/receive buffers
+- Minimize copying for bulk data transfer
+
+**Success Criteria**: Application opens TCP connection, transfers data, closes connection. Connection survives protocol stack restart (with state migration). Multiple applications communicate simultaneously.
+
+---
+
+### Stage 8: POSIX Compatibility Layer
+
+**Objective**: Enable existing Unix applications to run on microkernel OS.
+
+**Components**:
+
+**POSIX Server**:
+- User-space service implementing POSIX syscall interface
+- Receives syscall requests via IPC
+- Translates to native microkernel operations
+- Returns results to application
+
+**Syscall Interception**:
+- Special loader for POSIX applications
+- Redirects syscall instructions to IPC messages
+- Transparent to application code
+- No kernel modification required
+
+**Process Model Emulation**:
+- Fork/exec semantics implemented via process creation IPC
+- Process group and session management
+- Signal delivery via asynchronous IPC
+- Wait/waitpid through process termination notification
+
+**File Descriptor Mapping**:
+- File descriptors map to VFS file capabilities
+- Standard streams (stdin, stdout, stderr) established at process creation
+- Pipe and FIFO support through shared memory and synchronization
+
+**Filesystem Path Translation**:
+- POSIX paths mapped to VFS operations
+- Current working directory maintained per process
+- Path resolution implemented in POSIX server
+
+**Success Criteria**: Standard Unix utilities (ls, cat, grep, shell) run without modification. Shell scripts execute. Simple development tools (compiler, linker) function correctly.
+
+---
+
+### Stage 9: Multi-Core Support
+
+**Objective**: Utilize multiple CPU cores while maintaining isolation guarantees.
+
+**Components**:
+
+**Per-CPU Structures**:
+- Each CPU has dedicated kernel stack
+- Per-CPU current thread pointer
+- Per-CPU scheduler run queue
+- Per-CPU interrupt handling state
+
+**Bootstrap Protocol**:
+- Boot processor initializes kernel
+- Boot processor starts application processors
+- Each application processor initializes per-CPU state
+- Application processors enter scheduler
+
+**Scheduler Extensions**:
+- Load balancing between CPU run queues
+- Thread migration for work distribution
+- CPU affinity support for cache optimization
+- Preemption across all CPUs
+
+**Synchronization Primitives**:
+- Spinlocks for short critical sections
+- Read-write locks for reader-heavy workloads
+- Lock-free data structures where feasible
+- Deadlock detection in development builds
+
+**IPC Across Cores**:
+- Endpoint locking prevents race conditions
+- Thread blocking and wakeup handled atomically
+- Capability transfer synchronized correctly
+
+**Success Criteria**: All CPU cores execute threads. Work distributed across cores. System remains stable under high load on all cores.
+
+---
+
+### Stage 10: Advanced Scheduling and Real-Time
+
+**Objective**: Support diverse workload requirements with sophisticated scheduling.
+
+**Components**:
+
+**Scheduling Classes**:
+- Real-time: fixed-priority preemptive scheduling
+- Deadline: earliest deadline first scheduling
+- Fair: CPU time distributed proportionally
+- Interactive: low-latency for user-facing threads
+
+**Per-Thread Scheduling Parameters**:
+- Priority level within scheduling class
+- CPU affinity mask
+- Time quantum
+- Deadline parameters (period, execution time)
+
+**Priority Inheritance**:
+- Detect priority inversion situations
+- Temporarily boost low-priority thread holding lock
+- Restore original priority when lock released
+
+**Group Scheduling**:
+- Threads organized into scheduling groups
+- CPU time distributed between groups first, then within group
+- Supports container isolation and resource control
+
+**Success Criteria**: Audio processing thread meets real-time deadline consistently. Interactive UI thread maintains low latency under background load. Batch processing receives fair share without starving interactive work.
+
+---
+
+### Stage 11: Advanced Filesystem Features
+
+**Objective**: Provide modern filesystem capabilities beyond basic storage.
+
+**Components**:
+
+**Copy-on-Write Filesystem**:
+- Implement CoW semantics for efficient snapshots
+- Block sharing between files and snapshots
+- Space-efficient cloning of large files
+
+**Encryption Layer**:
+- Transparent encryption of file data
+- Key management via capability-controlled service
+- Per-file or per-directory encryption policies
+
+**Network Filesystems**:
+- NFS client implementation
+- SMB/CIFS client for Windows compatibility
+- Remote filesystem access via standard VFS interface
+
+**Union/Overlay Filesystems**:
+- Combine multiple filesystems into single view
+- Support for read-only base layer with writable overlay
+- Container and package management applications
+
+**Success Criteria**: Create filesystem snapshot instantly. Modify files without affecting snapshot. Encrypted filesystem survives key rotation. Network filesystem performs comparably to local storage.
+
+---
+
+### Stage 12: Container and Virtualization Support
+
+**Objective**: Enable lightweight isolation for application deployment.
+
+**Components**:
+
+**Namespace Isolation**:
+- Process ID namespace per container
+- Filesystem namespace (chroot equivalent)
+- Network namespace with separate stack instance
+- IPC namespace with isolated endpoint space
+
+**Resource Limits**:
+- CPU time limits per container
+- Memory usage limits enforced by memory manager
+- Network bandwidth limits
+- Disk I/O rate limits
+
+**Container Lifecycle**:
+- Container creation from image
+- Process injection into existing container
+- Container pause and resume
+- Container checkpoint and migration
+
+**VM Support**:
+- Hypervisor service using hardware virtualization
+- Device passthrough via IOMMU
+- Virtual device emulation in user space
+
+**Success Criteria**: Multiple containers run simultaneously with isolation. Resource limits enforced. Container checkpoint completes in seconds. Virtual machine runs legacy OS.
+
+---
+
+### Stage 13: Power Management
+
+**Objective**: Optimize power consumption without sacrificing responsiveness.
+
+**Components**:
+
+**CPU Frequency Scaling**:
+- Dynamic adjustment based on load
+- Integration with scheduler for intelligent scaling decisions
+- Per-core frequency control on supported hardware
+
+**Sleep States**:
+- Idle CPU cores enter low-power states
+- Wake on timer or interrupt
+- Coordinated sleep across all cores
+
+**Device Power Management**:
+- Driver-controlled device power states
+- Suspend and resume protocol
+- Runtime power management for idle devices
+
+**System Suspend**:
+- Suspend-to-RAM (S3 state)
+- Suspend-to-disk (hibernation)
+- Fast resume with state preservation
+
+**Success Criteria**: Idle laptop achieves multiple hours battery life. Resume from suspend completes in under one second. CPU frequency scales appropriately with load.
+
+---
+
+### Stage 14: Debugging and Observability
+
+**Objective**: Provide comprehensive system introspection and debugging tools.
+
+**Components**:
+
+**System Call Tracing**:
+- Trace all IPC messages with capability filtering
+- Record timing and data for performance analysis
+- Minimal overhead when not actively tracing
+
+**Capability Audit**:
+- Track capability creation, transfer, and destruction
+- Identify capability leak sources
+- Enforce mandatory access control policies
+
+**Performance Counters**:
+- CPU performance counter access via capability
+- Per-thread and per-process performance metrics
+- System-wide statistics aggregation
+
+**Debug Services**:
+- Kernel debugger for crash analysis
+- User-space debugger with ptrace equivalent
+- Core dump generation with capability preservation
+
+**Success Criteria**: Trace all filesystem operations for application. Identify process holding excessive capabilities. Debug userspace driver with breakpoints and variable inspection.
+
+---
+
+### Stage 15: Security Hardening and Formal Verification
+
+**Objective**: Achieve high assurance through verification and hardening.
+
+**Components**:
+
+**Formal Verification**:
+- Specify kernel invariants formally
+- Prove critical properties (memory isolation, capability unforgability)
+- Automated theorem proving for core mechanisms
+
+**Security Audit**:
+- Third-party code review of kernel
+- Fuzzing of IPC and capability interfaces
+- Penetration testing of isolation boundaries
+
+**Hardening Features**:
+- Kernel address space layout randomization
+- Stack canaries in kernel code
+- Control flow integrity enforcement
+- Capability-based exploit mitigation
+
+**Certification**:
+- Common Criteria evaluation
+- FIPS 140-3 compliance for cryptographic components
+- Safety-critical certification for real-time variant
+
+**Success Criteria**: Formal proof of memory isolation property. Zero kernel crashes in 1000-hour fuzz testing. Independent security audit finds no critical vulnerabilities.
+
+---
+
+## Conclusion
+
+This architecture specification defines a microkernel operating system that addresses fundamental security and reliability limitations of monolithic designs while maintaining ecosystem compatibility.
+
+The development roadmap proceeds incrementally from bare metal boot to full-featured OS, with each stage building on verified foundations.
+
+The Rust implementation ensures memory safety at the language level, eliminating entire vulnerability classes.
+
+The result is a system suitable for deployment in security-critical, safety-critical, and general-purpose computing environments.
