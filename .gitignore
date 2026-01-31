@@ -2,6 +2,7 @@
 /os.img
 /os-bios.img
 /os-uefi.img
+*.img
 *.log
 *.fd
 .env
