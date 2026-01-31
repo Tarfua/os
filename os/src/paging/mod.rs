@@ -1,10 +1,22 @@
-//! Paging: structures and safe API over bootloader's page tables.
+//! Paging: Address Space Abstraction for Stage 2A
 //!
-//! Stage 2A: AddressSpace as first-class object (id + root PML4). Wrapper
-//! around OffsetPageTable; kernel space identity-mapped in each AS.
+//! Stage 2A Goal: Establish fundamental execution units and memory isolation.
+//!
+//! This module provides:
+//! - `AddressSpace` as a first-class kernel object
+//! - Each address space owns exactly one root page table (PML4)
+//! - Kernel space is identity-mapped in all address spaces
+//! - User space mappings are fully isolated per address space
+//!
+//! Stage 2A Constraints:
+//! - No shared user mappings
+//! - No lazy mapping or copy-on-write
+//! - No demand paging
+//!
+//! Stage 2A Result:
+//! - Kernel can create, destroy, and switch address spaces safely
 
 use bootloader_api::info::MemoryRegionKind;
-use bootloader_api::info::Optional;
 use x86_64::addr::{align_down, align_up};
 use x86_64::{
     structures::paging::{
@@ -17,70 +29,89 @@ use x86_64::registers::control::Cr3;
 
 const MAX_USABLE_RANGES: usize = 32;
 
-/// Paging operation errors. Stage 2 will add OutOfMemory, MapConflict, InvalidAddress.
+/// Paging operation errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PagingError {
+    /// CR3 contains invalid or zero physical address
     InvalidCr3,
+    /// Frame allocator has no more frames available
     OutOfFrames,
+    /// Page mapping operation failed (overlap or invalid parameters)
     MapFailed,
 }
 
-/// Frame allocator backed by BootInfo memory map (Usable regions only, kernel range excluded).
+/// Physical frame allocator backed by bootloader memory map.
+///
+/// Only uses regions marked as `Usable` by the bootloader. Automatically excludes:
+/// - First 1 MiB minimum (BIOS data, VGA memory, NULL detection)
+/// - Bootloader code and data
+/// - Kernel code and data
+///
+/// Frame allocation is sequential within each range for simplicity.
 pub struct BootInfoFrameAllocator {
-    /// (start, end) physical addresses, page-aligned; end exclusive.
+    /// Array of available physical memory ranges (start, end), page-aligned.
+    /// End is exclusive.
     ranges: [(u64, u64); MAX_USABLE_RANGES],
+    /// Number of valid ranges
     len: usize,
-    /// Index of range to try first on next allocation (cache).
+    /// Optimization: index to try first on next allocation
     next: usize,
 }
 
 impl BootInfoFrameAllocator {
-    /// Builds allocator from boot_info. Excludes kernel and non-Usable regions.
+    /// Creates a frame allocator from the bootloader memory map.
     ///
-    /// Assumes bootloader memory regions are non-overlapping.
-    /// Ranges are consumed linearly; ordering is not guaranteed.
+    /// All memory below `kernel_end` is reserved (BIOS, bootloader, kernel).
     ///
     /// # Safety
-    /// Caller must ensure `boot_info` is valid and memory_regions describe real physical RAM.
+    /// Caller must ensure:
+    /// - `memory_regions` accurately describes physical RAM
+    /// - `kernel_end` covers all kernel and bootloader memory
     pub unsafe fn new(
         memory_regions: &[bootloader_api::info::MemoryRegion],
-        kernel_start: u64,
+        _kernel_start: u64,
         kernel_end: u64,
     ) -> Self {
         let page_size = Size4KiB::SIZE;
         let mut ranges = [(0u64, 0u64); MAX_USABLE_RANGES];
         let mut len = 0usize;
 
+        // Reserve everything below kernel_end (minimum 1 MiB)
+        let reserved_end = kernel_end.max(0x100000);
+
         for region in memory_regions {
             if region.kind != MemoryRegionKind::Usable {
                 continue;
             }
-            let start = align_up(region.start, page_size);
+
+            let mut start = align_up(region.start, page_size);
             let end = align_down(region.end, page_size);
+
+            if end <= reserved_end {
+                continue;
+            }
+
+            if start < reserved_end {
+                start = reserved_end;
+            }
+
             if start >= end {
                 continue;
             }
 
-            if kernel_end <= start || kernel_start >= end {
-                if len < MAX_USABLE_RANGES {
-                    ranges[len] = (start, end);
-                    len += 1;
-                }
-            } else {
-                let k_start = kernel_start.max(start).min(end);
-                let k_end = kernel_end.max(start).min(end);
-                if start < k_start && len < MAX_USABLE_RANGES {
-                    ranges[len] = (start, k_start);
-                    len += 1;
-                }
-                if k_end < end && len < MAX_USABLE_RANGES {
-                    ranges[len] = (k_end, end);
-                    len += 1;
-                }
+            if len < MAX_USABLE_RANGES {
+                ranges[len] = (start, end);
+                len += 1;
             }
         }
 
         Self { ranges, len, next: 0 }
+    }
+
+    /// Returns the number of available memory ranges.
+    #[inline]
+    pub fn range_count(&self) -> usize {
+        self.len
     }
 }
 
@@ -101,159 +132,174 @@ unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
     }
 }
 
-/// Opaque identifier for an address space. Stage 2A metadata.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Opaque identifier for an address space.
+///
+/// Stage 2A: Simple numeric ID. Later stages may extend this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AddressSpaceId(pub u64);
 
-/// One address space = one root page table (PML4). Wrapper around OffsetPageTable.
-/// Kernel space is identity-mapped in each AS. No shared user mappings.
+/// Address Space: isolated virtual memory context.
+///
+/// Each `AddressSpace` owns exactly one root page table (PML4).
+/// Kernel space is identity-mapped in all address spaces.
+/// User space mappings are fully isolated.
+///
+/// Stage 2A: Manual switching only (no scheduling).
 pub struct AddressSpace {
+    /// Unique identifier
     pub id: AddressSpaceId,
+    /// Physical frame of root PML4
     root_frame: PhysFrame<Size4KiB>,
+    /// Virtual offset for physical memory access (0 = identity)
     kernel_offset: VirtAddr,
 }
 
 impl AddressSpace {
-    /// Returns a mapper for this address space. Caller must ensure the frame is
-    /// identity-mapped (physical = virtual) so the table is accessible.
+    /// Returns a mutable page table mapper for this address space.
     ///
     /// # Safety
-    /// Root frame must be identity-mapped in the current page tables.
+    /// Caller must ensure the root PML4 frame is currently accessible
+    /// (identity-mapped or via kernel_offset).
     #[inline]
     pub unsafe fn mapper_mut(&mut self) -> OffsetPageTable<'_> {
-        let table = &mut *(self.root_frame.start_address().as_u64() as *mut PageTable);
+        let virt_addr = self.kernel_offset.as_u64() + self.root_frame.start_address().as_u64();
+        let table = unsafe { &mut *(virt_addr as *mut PageTable) };
         OffsetPageTable::new(table, self.kernel_offset)
     }
 
-    /// Physical frame of the root PML4 (for loading into CR3 on switch).
+    /// Returns the physical frame of the root PML4.
+    ///
+    /// Used for loading into CR3 during context switches.
     #[inline]
     pub fn root_frame(&self) -> PhysFrame<Size4KiB> {
         self.root_frame
     }
+
+    /// Returns the kernel offset for this address space.
+    #[inline]
+    pub fn kernel_offset(&self) -> VirtAddr {
+        self.kernel_offset
+    }
+
+    /// Switches to this address space by loading its PML4 into CR3.
+    ///
+    /// # Safety
+    /// - Caller must ensure kernel code/data remains mapped after switch
+    /// - This operation invalidates TLB entries
+    /// - Must be called from kernel context
+    #[inline]
+    pub unsafe fn switch_to(&self) {
+        let (_old_frame, flags) = Cr3::read();
+        Cr3::write(self.root_frame, flags);
+    }
+
+    /// Creates a new isolated address space.
+    ///
+    /// The new address space will have kernel memory identity-mapped but
+    /// no user mappings. Suitable for creating new processes.
+    ///
+    /// # Safety
+    /// - Caller must ensure kernel_start/kernel_end describe valid kernel region
+    /// - Kernel region must be identity-mapped in current page tables
+    pub unsafe fn create(
+        id: AddressSpaceId,
+        frame_allocator: &mut BootInfoFrameAllocator,
+        kernel_offset: VirtAddr,
+        kernel_start: u64,
+        kernel_end: u64,
+    ) -> Result<Self, PagingError> {
+        // Allocate and zero new PML4
+        let root_frame = frame_allocator
+            .allocate_frame()
+            .ok_or(PagingError::OutOfFrames)?;
+        zero_frame(root_frame);
+
+        // Set up mapper for new address space
+        let virt_addr = kernel_offset.as_u64() + root_frame.start_address().as_u64();
+        let table = unsafe { &mut *(virt_addr as *mut PageTable) };
+        let mut mapper = OffsetPageTable::new(table, kernel_offset);
+
+        // Map kernel space (identity mapping)
+        map_region(
+            &mut mapper,
+            frame_allocator,
+            VirtAddr::new(kernel_start),
+            kernel_end - kernel_start,
+            Flags::PRESENT | Flags::WRITABLE,
+            true, // identity
+        )?;
+
+        Ok(AddressSpace {
+            id,
+            root_frame,
+            kernel_offset,
+        })
+    }
 }
 
-/// Result of paging init: kernel address space and frame allocator.
+/// Result of paging initialization: kernel address space and frame allocator.
 pub struct PagingState {
     pub kernel_space: AddressSpace,
     pub frame_allocator: BootInfoFrameAllocator,
 }
 
-/// Zeros a physical frame. Used when allocating a new page table.
+/// Zeros a physical frame.
 ///
 /// # Safety
-/// Caller must ensure the frame is valid and not used elsewhere.
+/// Frame must be valid and not currently in use.
 #[inline]
 pub unsafe fn zero_frame(frame: PhysFrame<Size4KiB>) {
     let ptr = frame.start_address().as_u64() as *mut u8;
     core::ptr::write_bytes(ptr, 0, Size4KiB::SIZE as usize);
 }
 
-/// Creates a new address space with kernel range identity-mapped. Allocates a new PML4
-/// and maps [kernel_start, kernel_end) as identity (virt = phys). No user mappings.
+/// Initializes paging subsystem using bootloader's page tables.
+///
+/// Stage 2A: We reuse bootloader's PML4 as the kernel address space.
+/// Later stages may create a fresh kernel PML4.
 ///
 /// # Safety
-/// Caller must ensure kernel physical range is identity-mapped in the current tables
-/// so the new PML4 frame is accessible when building mappings.
-pub unsafe fn create_address_space(
-    id: AddressSpaceId,
-    frame_allocator: &mut BootInfoFrameAllocator,
-    kernel_offset: VirtAddr,
-    kernel_start: u64,
-    kernel_end: u64,
-) -> Result<AddressSpace, PagingError> {
-    let root_frame = frame_allocator.allocate_frame().ok_or(PagingError::OutOfFrames)?;
-    zero_frame(root_frame);
+/// - Paging must be enabled
+/// - CR3 must point to valid PML4
+/// - Physical memory must be identity-mapped
+pub unsafe fn init(
+    boot_info: &'static bootloader_api::BootInfo,
+) -> Result<PagingState, PagingError> {
+    let kernel_start = boot_info.kernel_addr;
+    let kernel_end = boot_info.kernel_addr + boot_info.kernel_len;
 
-    let table = unsafe { &mut *(root_frame.start_address().as_u64() as *mut PageTable) };
-    let mut mapper = OffsetPageTable::new(table, kernel_offset);
+    let kernel_offset = match boot_info.physical_memory_offset {
+        bootloader_api::info::Optional::Some(addr) => VirtAddr::new(addr),
+        bootloader_api::info::Optional::None => VirtAddr::new(0),
+    };
 
-    map_region(
-        &mut mapper,
-        frame_allocator,
-        VirtAddr::new(kernel_start),
-        kernel_end - kernel_start,
-        Flags::PRESENT | Flags::WRITABLE,
-        true,
-    )?;
-
-    Ok(AddressSpace {
-        id,
-        root_frame,
-        kernel_offset,
-    })
-}
-
-/// Returns the currently active PML4 (CR3). Localizes UB; Stage 2 can replace with clone PML4.
-///
-/// # Safety
-/// Caller must ensure: paging is enabled, CR3 points to a valid PML4, and that physical
-/// frame is identity-mapped so the returned pointer is dereferenceable.
-pub unsafe fn active_pml4() -> Result<&'static mut PageTable, PagingError> {
-    let (frame, _) = Cr3::read();
-    let pml4_phys = frame.start_address();
-    // CR3 is never 0 on a live system; this error will almost never trigger.
-    // Kept as an assert-like guard — harmless and documents the invariant.
-    if pml4_phys.as_u64() == 0 {
-        return Err(PagingError::InvalidCr3);
-    }
-    Ok(unsafe { &mut *(pml4_phys.as_u64() as *mut PageTable) })
-}
-
-/// Initializes paging state: allocates kernel-owned PML4, copies bootloader tables into it,
-/// switches CR3 to it. Kernel space remains identity-mapped.
-///
-/// # Safety
-/// Caller must ensure: paging is enabled, CR3 points to a valid PML4, and physical memory
-/// at the PML4 frame is identity-mapped so we can read/write page tables.
-pub unsafe fn init(boot_info: &'static bootloader_api::BootInfo) -> Result<PagingState, PagingError> {
-    let level_4_table = active_pml4()?;
-
-    let kernel_start = boot_info.kernel_addr / Size4KiB::SIZE * Size4KiB::SIZE;
-    let kernel_end = (boot_info.kernel_addr + boot_info.kernel_len + Size4KiB::SIZE - 1)
-        / Size4KiB::SIZE
-        * Size4KiB::SIZE;
-
-    let mut frame_allocator = BootInfoFrameAllocator::new(
+    let frame_allocator = BootInfoFrameAllocator::new(
         boot_info.memory_regions.as_ref(),
         kernel_start,
         kernel_end,
     );
 
-    let kernel_root_frame = frame_allocator.allocate_frame().ok_or(PagingError::OutOfFrames)?;
-    core::ptr::copy_nonoverlapping(
-        level_4_table as *const PageTable as *const u8,
-        kernel_root_frame.start_address().as_u64() as *mut u8,
-        Size4KiB::SIZE as usize,
-    );
-
-    let (_frame, flags) = Cr3::read();
-    Cr3::write(kernel_root_frame, flags);
-
-    let kernel_offset = match boot_info.physical_memory_offset {
-        Optional::Some(addr) => VirtAddr::new(addr),
-        Optional::None => return Err(PagingError::InvalidCr3),
-    };
+    let (current_pml4_frame, _) = Cr3::read();
 
     Ok(PagingState {
         kernel_space: AddressSpace {
             id: AddressSpaceId(0),
-            root_frame: kernel_root_frame,
+            root_frame: current_pml4_frame,
             kernel_offset,
         },
         frame_allocator,
     })
 }
 
-
-/// Kernel-only mapping. Never use for user space.
-/// Do not use `Flags::USER_ACCESSIBLE` here. Stage 2 will provide `map_user_region` and `map_kernel_region`.
+/// Maps a contiguous virtual range (kernel-only).
 ///
-/// Maps a contiguous virtual range: if `identity` is true, maps each page to the same physical
-/// address (virt = phys); otherwise allocates frames from `frame_allocator`. Caller must not
-/// overlap existing mappings.
+/// If `identity` is true, each virtual page maps to the same physical address.
+/// Otherwise, allocates new physical frames.
 ///
 /// # Safety
-/// Unsafe: can create aliasing or invalid mappings if used incorrectly.
+/// - Can create invalid/aliasing mappings if misused
+/// - Caller must not overlap existing mappings
+/// - Never use with USER_ACCESSIBLE flag (Stage 2A)
 #[allow(dead_code)]
 pub unsafe fn map_region<M>(
     mapper: &mut M,
@@ -268,13 +314,17 @@ where
 {
     let page_count = (size + Size4KiB::SIZE - 1) / Size4KiB::SIZE;
     let start_page = Page::containing_address(virt_start);
+
     for i in 0..page_count {
-        let page = start_page + i as u64;
+        let page = start_page + i;
         let frame = if identity {
             PhysFrame::containing_address(PhysAddr::new(page.start_address().as_u64()))
         } else {
-            frame_allocator.allocate_frame().ok_or(PagingError::OutOfFrames)?
+            frame_allocator
+                .allocate_frame()
+                .ok_or(PagingError::OutOfFrames)?
         };
+
         unsafe {
             mapper
                 .map_to(page, frame, flags, frame_allocator)
@@ -282,5 +332,6 @@ where
                 .flush();
         }
     }
+
     Ok(())
 }

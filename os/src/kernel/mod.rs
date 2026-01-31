@@ -8,7 +8,9 @@ pub struct KernelState {
     pub paging: crate::paging::PagingState,
 }
 
-pub fn early_init(boot_info: &'static bootloader_api::BootInfo) -> Result<KernelState, KernelInitError> {
+pub fn early_init(
+    boot_info: &'static bootloader_api::BootInfo,
+) -> Result<KernelState, KernelInitError> {
     crate::serial::init();
     crate::serial::write_str("Stage 1: kernel running\n");
 
@@ -18,10 +20,12 @@ pub fn early_init(boot_info: &'static bootloader_api::BootInfo) -> Result<Kernel
         crate::serial::write_str("NOT in long mode\n");
     }
 
-    let paging = unsafe { crate::paging::init(boot_info) }.map_err(|_| KernelInitError::PagingInitFailed)?;
+    let paging = unsafe { crate::paging::init(boot_info) }
+        .map_err(|_| KernelInitError::PagingInitFailed)?;
+
     crate::serial::write_str("paging: init OK (bootloader tables)\n");
 
-    // Order: GDT (TSS) -> IDT -> PIC remap -> PIT rate -> enable interrupts.
+    // Initialize GDT, IDT, PIC, PIT
     crate::gdt::init();
     crate::idt::init();
     crate::pic::init();
@@ -33,7 +37,8 @@ pub fn early_init(boot_info: &'static bootloader_api::BootInfo) -> Result<Kernel
     Ok(KernelState { paging })
 }
 
-pub fn kernel_loop(state: KernelState) -> ! {
-    let _ = state;
-    loop {}
+pub fn kernel_loop(_state: KernelState) -> ! {
+    loop {
+        x86_64::instructions::hlt();
+    }
 }
