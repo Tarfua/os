@@ -16,11 +16,12 @@ mod error;
 mod frame_allocator;
 mod init;
 mod mapper;
+mod pt;
 
 // Public exports
 pub use address_space::{AddressSpace, AddressSpaceId};
 pub use error::{PagingError, PagingResult};
-pub use frame_allocator::BootInfoFrameAllocator;
+pub use frame_allocator::EarlyFrameAllocator;
 pub use init::{init, PagingState};
 
 // Internal utilities (not exported publicly)

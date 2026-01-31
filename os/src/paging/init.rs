@@ -1,6 +1,6 @@
 //! Paging subsystem initialization
 
-use super::{AddressSpace, AddressSpaceId, BootInfoFrameAllocator, PagingResult};
+use super::{AddressSpace, AddressSpaceId, EarlyFrameAllocator, PagingResult};
 use bootloader_api::BootInfo;
 use crate::serial;
 use core::fmt::Write;
@@ -11,7 +11,7 @@ pub struct PagingState {
     /// Kernel address space (ID 0)
     pub kernel_space: AddressSpace,
     /// Physical frame allocator
-    pub frame_allocator: BootInfoFrameAllocator,
+    pub frame_allocator: EarlyFrameAllocator,
 }
 
 /// Initializes paging subsystem using bootloader's page tables.
@@ -72,7 +72,7 @@ pub unsafe fn init(boot_info: &'static BootInfo) -> PagingResult<PagingState> {
     }
 
     let frame_allocator =
-        BootInfoFrameAllocator::new(&boot_info.memory_regions, kernel_start, kernel_end);
+        EarlyFrameAllocator::new(&boot_info.memory_regions, kernel_start, kernel_end);
 
     let (current_pml4_frame, _) = Cr3::read();
 
@@ -85,12 +85,14 @@ pub unsafe fn init(boot_info: &'static BootInfo) -> PagingResult<PagingState> {
         current_pml4_frame.start_address().as_u64()
     );
 
+    let kernel_space = AddressSpace::from_existing(
+        AddressSpaceId::KERNEL,
+        current_pml4_frame,
+        kernel_offset,
+    );
+    
     Ok(PagingState {
-        kernel_space: AddressSpace::from_existing(
-            AddressSpaceId::KERNEL,
-            current_pml4_frame,
-            kernel_offset,
-        ),
+        kernel_space,
         frame_allocator,
     })
 }

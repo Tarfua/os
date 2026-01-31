@@ -18,7 +18,7 @@ const MAX_USABLE_RANGES: usize = 32;
 /// - First 1 MiB minimum (BIOS data, VGA memory, NULL detection)
 /// - Bootloader code and data
 /// - Kernel code and data
-pub struct BootInfoFrameAllocator {
+pub struct EarlyFrameAllocator {
     /// Array of available physical memory ranges (start, end), page-aligned.
     /// End is exclusive.
     ranges: [(u64, u64); MAX_USABLE_RANGES],
@@ -28,7 +28,7 @@ pub struct BootInfoFrameAllocator {
     next: usize,
 }
 
-impl BootInfoFrameAllocator {
+impl EarlyFrameAllocator {
     /// Creates a frame allocator from the bootloader memory map.
     ///
     /// All memory below `kernel_end` is reserved (BIOS, bootloader, kernel).
@@ -103,7 +103,7 @@ impl BootInfoFrameAllocator {
     }
 }
 
-unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
+unsafe impl FrameAllocator<Size4KiB> for EarlyFrameAllocator {
     fn allocate_frame(&mut self) -> Option<PhysFrame<Size4KiB>> {
         let n = self.len;
         for j in 0..n {

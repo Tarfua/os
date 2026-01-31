@@ -4,12 +4,14 @@
 //! Stage 2B: Per-thread address spaces
 //! Stage 2C+: Capability-controlled memory authority
 
-use super::{mapper, BootInfoFrameAllocator, PagingResult};
+use super::{mapper, EarlyFrameAllocator, PagingResult};
 use x86_64::{
     registers::control::Cr3,
     structures::paging::{FrameAllocator, OffsetPageTable, PageTable, PageTableFlags as Flags, PhysFrame, Size4KiB},
     VirtAddr,
 };
+use super::pt::PageTableRoot;
+use super::mapper::MapType;
 
 /// Opaque identifier for an address space.
 ///
@@ -40,14 +42,12 @@ impl AddressSpaceId {
 pub struct AddressSpace {
     /// Unique identifier
     pub id: AddressSpaceId,
-    /// Physical frame of root PML4
-    root_frame: PhysFrame<Size4KiB>,
-    /// Virtual offset for physical memory access (0 = identity)
-    kernel_offset: VirtAddr,
+    /// Root page table
+    pt_root: PageTableRoot,
 }
 
 impl AddressSpace {
-        /// Creates an AddressSpace from existing PML4 frame.
+    /// Creates an AddressSpace from existing PageTableRoot.
     ///
     /// Used during initialization to wrap bootloader's PML4.
     ///
@@ -60,35 +60,8 @@ impl AddressSpace {
     ) -> Self {
         Self {
             id,
-            root_frame,
-            kernel_offset,
+            pt_root: PageTableRoot::new(root_frame, kernel_offset),
         }
-    }
-    
-    /// Returns a mutable page table mapper for this address space.
-    ///
-    /// # Safety
-    /// Caller must ensure the root PML4 frame is currently accessible
-    /// (identity-mapped or via kernel_offset).
-    #[inline]
-    pub unsafe fn mapper_mut(&mut self) -> OffsetPageTable<'_> {
-        let virt_addr = self.kernel_offset.as_u64() + self.root_frame.start_address().as_u64();
-        let table = unsafe { &mut *(virt_addr as *mut PageTable) };
-        OffsetPageTable::new(table, self.kernel_offset)
-    }
-
-    /// Returns the physical frame of the root PML4.
-    ///
-    /// Used for loading into CR3 during context switches.
-    #[inline]
-    pub fn root_frame(&self) -> PhysFrame<Size4KiB> {
-        self.root_frame
-    }
-
-    /// Returns the kernel offset for this address space.
-    #[inline]
-    pub fn kernel_offset(&self) -> VirtAddr {
-        self.kernel_offset
     }
 
     /// Switches to this address space by loading its PML4 into CR3.
@@ -99,9 +72,9 @@ impl AddressSpace {
     /// - Must be called from kernel context
     #[inline]
     pub unsafe fn switch_to(&self) {
-        let (_old_frame, flags) = Cr3::read();
-        Cr3::write(self.root_frame, flags);
-    }
+        let (_, flags) = Cr3::read();
+        Cr3::write(self.pt_root.frame(), flags);
+    }    
 
     /// Creates a new isolated address space.
     ///
@@ -113,7 +86,7 @@ impl AddressSpace {
     /// - Kernel region must be identity-mapped in current page tables
     pub unsafe fn create(
         id: AddressSpaceId,
-        frame_allocator: &mut BootInfoFrameAllocator,
+        frame_allocator: &mut EarlyFrameAllocator,
         kernel_offset: VirtAddr,
         kernel_start: u64,
         kernel_end: u64,
@@ -138,13 +111,12 @@ impl AddressSpace {
             VirtAddr::new(kernel_start),
             kernel_end - kernel_start,
             Flags::PRESENT | Flags::WRITABLE,
-            true, // identity
+            MapType::Identity,
         )?;
 
         Ok(AddressSpace {
             id,
-            root_frame,
-            kernel_offset,
+            pt_root: PageTableRoot::new(root_frame, kernel_offset),
         })
     }
 
@@ -157,19 +129,19 @@ impl AddressSpace {
     /// - Must not overlap with kernel space
     /// - Must not create aliasing issues
     pub unsafe fn map_user_region(
-        &mut self,
-        frame_allocator: &mut BootInfoFrameAllocator,
-        virt_start: VirtAddr,
+        &self,
+        allocator: &mut impl FrameAllocator<Size4KiB>,
+        start: VirtAddr,
         size: u64,
     ) -> PagingResult<()> {
-        let mut mapper = unsafe { self.mapper_mut() };
+        let mut mapper = self.pt_root.mapper();
         mapper::map_region(
             &mut mapper,
-            frame_allocator,
-            virt_start,
+            allocator,
+            start,
             size,
             Flags::PRESENT | Flags::WRITABLE | Flags::USER_ACCESSIBLE,
-            false, // allocate new frames
+            MapType::Allocate,
         )
     }
 
@@ -191,7 +163,7 @@ impl AddressSpace {
     /// - Must not be called on the currently active address space
     /// - Must not be called on kernel address space (ID 0)
     /// - Caller must ensure no references to this AS remain
-    pub unsafe fn destroy(self, _frame_allocator: &mut BootInfoFrameAllocator) {
+    pub unsafe fn destroy(self, _frame_allocator: &mut EarlyFrameAllocator) {
         // Safety check: never destroy kernel address space
         if self.id == AddressSpaceId::KERNEL {
             return;
@@ -208,6 +180,23 @@ impl AddressSpace {
         // 3. Deallocates the frames themselves
         
         core::mem::drop(self);
+    }
+
+    pub unsafe fn map_kernel_region(
+        &self,
+        allocator: &mut impl FrameAllocator<Size4KiB>,
+        start: VirtAddr,
+        size: u64,
+    ) -> PagingResult<()> {
+        let mut mapper = self.pt_root.mapper();
+        mapper::map_region(
+            &mut mapper,
+            allocator,
+            start,
+            size,
+            Flags::PRESENT | Flags::WRITABLE | Flags::GLOBAL,
+            MapType::Identity,
+        )
     }
 }
 
