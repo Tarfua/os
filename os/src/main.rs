@@ -17,8 +17,13 @@ use core::panic::PanicInfo;
 bootloader_api::entry_point!(kernel_main);
 
 fn kernel_main(boot_info: &'static mut bootloader_api::BootInfo) -> ! {
-    kernel::early_init(boot_info);
-    kernel::kernel_loop()
+    match kernel::early_init(&*boot_info) {
+        Ok(state) => kernel::kernel_loop(state),
+        Err(_) => {
+            serial::write_str("paging: init failed\n");
+            loop {}
+        }
+    }
 }
 
 #[panic_handler]
