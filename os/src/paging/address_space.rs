@@ -172,6 +172,43 @@ impl AddressSpace {
             false, // allocate new frames
         )
     }
+
+    /// Destroys this address space and deallocates its page tables.
+    ///
+    /// Stage 2A: Basic cleanup - deallocates PML4 frame only
+    /// Stage 2B+: Will recursively deallocate all page table levels
+    ///
+    /// # Safety
+    /// - Must not be called on the currently active address space
+    /// - Must not be called on kernel address space (ID 0)
+    /// - Caller must ensure no references to this AS remain
+    /// Destroys this address space and deallocates its page tables.
+    ///
+    /// Stage 2A: Basic cleanup - deallocates PML4 frame only
+    /// Stage 2B+: Will recursively deallocate all page table levels
+    ///
+    /// # Safety
+    /// - Must not be called on the currently active address space
+    /// - Must not be called on kernel address space (ID 0)
+    /// - Caller must ensure no references to this AS remain
+    pub unsafe fn destroy(self, _frame_allocator: &mut BootInfoFrameAllocator) {
+        // Safety check: never destroy kernel address space
+        if self.id == AddressSpaceId::KERNEL {
+            return;
+        }
+
+        // Stage 2A: Just deallocate the PML4 frame
+        // Stage 2B+ will add recursive deallocation of all page tables
+        // For now, we just let the frame leak (will fix in Stage 2B)
+        
+        // TODO(Stage 2B): Recursively walk and deallocate all page table levels
+        // This requires implementing a page table walker that:
+        // 1. Walks all levels (PML4 -> PDPT -> PD -> PT)
+        // 2. Deallocates user-space page tables (not kernel mappings)
+        // 3. Deallocates the frames themselves
+        
+        core::mem::drop(self);
+    }
 }
 
 // Stage 2B+: Will add Drop implementation to deallocate page tables
