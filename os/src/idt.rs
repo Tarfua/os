@@ -3,6 +3,7 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 
+// IDT is global and immutable after init.
 static mut IDT: InterruptDescriptorTable = InterruptDescriptorTable::new();
 
 static TICK_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -24,12 +25,16 @@ extern "x86-interrupt" fn breakpoint_handler(frame: InterruptStackFrame) {
     let _ = frame;
 }
 
-extern "x86-interrupt" fn timer_handler(_frame: InterruptStackFrame) {
-    crate::pic::notify_end_of_interrupt();
+fn on_timer_tick() {
     let n = TICK_COUNT.fetch_add(1, Ordering::Relaxed);
     if (n + 1) % TICKS_PER_DOT == 0 {
         crate::serial::write_byte(b'.');
     }
+}
+
+extern "x86-interrupt" fn timer_handler(_frame: InterruptStackFrame) {
+    crate::pic::notify_end_of_interrupt();
+    on_timer_tick();
 }
 
 /// Fills IDT with handlers and loads it. Call after gdt::init().
