@@ -43,3 +43,15 @@ pub fn write_str(s: &str) {
         write_byte(b);
     }
 }
+
+/// Writer struct for use with core::fmt::Write
+pub struct Writer;
+
+impl core::fmt::Write for Writer {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        for b in s.bytes() {
+            write_byte(b);
+        }
+        Ok(())
+    }
+}
