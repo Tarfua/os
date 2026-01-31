@@ -2,6 +2,8 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
+use x86_64::registers::control::Cr2;
+use x86_64::structures::idt::PageFaultErrorCode;
 
 // IDT is global and immutable after init.
 static mut IDT: InterruptDescriptorTable = InterruptDescriptorTable::new();
@@ -37,6 +39,29 @@ extern "x86-interrupt" fn timer_handler(_frame: InterruptStackFrame) {
     on_timer_tick();
 }
 
+extern "x86-interrupt" fn page_fault_handler(
+    stack_frame: InterruptStackFrame,
+    error_code: PageFaultErrorCode,
+) {
+    // Get physical address, or 0 if error
+    let fault_addr = match Cr2::read() {
+        Ok(addr) => addr.as_u64(),
+        Err(_) => 0,
+    };
+
+    crate::serial::write_str("\nPAGE FAULT!\n");
+    crate::serial::write_fmt(format_args!(
+        "Accessed address: {:#x}\nError code: {:?}\nInstruction at: {:#x}\n",
+        fault_addr,
+        error_code,
+        stack_frame.instruction_pointer.as_u64()
+    ));
+
+    loop {
+        x86_64::instructions::hlt();
+    }
+}
+
 /// Fills IDT with handlers and loads it. Call after gdt::init().
 pub fn init() {
     unsafe {
@@ -49,6 +74,8 @@ pub fn init() {
         idt.breakpoint
             .set_handler_fn(breakpoint_handler);
         idt.slice_mut(32..33)[0].set_handler_fn(timer_handler);
+        idt.page_fault
+            .set_handler_fn(page_fault_handler);
 
         let idt_ref: &'static InterruptDescriptorTable = &*core::ptr::addr_of!(IDT);
         idt_ref.load();
