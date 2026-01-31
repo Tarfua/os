@@ -9,6 +9,9 @@ use x86_64::instructions::tables::load_tss;
 
 const DOUBLE_FAULT_STACK_SIZE: usize = 4096;
 
+/// IST index used for the double-fault handler (TSS.interrupt_stack_table[0]).
+pub const DF_IST_INDEX: u16 = 0;
+
 static mut DOUBLE_FAULT_STACK: [u8; DOUBLE_FAULT_STACK_SIZE] = [0; DOUBLE_FAULT_STACK_SIZE];
 static mut TSS: TaskStateSegment = TaskStateSegment::new();
 static mut GDT: GlobalDescriptorTable = GlobalDescriptorTable::empty();

@@ -45,7 +45,7 @@ pub fn init() {
             .set_handler_fn(divide_error_handler);
         idt.double_fault
             .set_handler_fn(double_fault_handler)
-            .set_stack_index(0);
+            .set_stack_index(crate::gdt::DF_IST_INDEX);
         idt.breakpoint
             .set_handler_fn(breakpoint_handler);
         idt.slice_mut(32..33)[0].set_handler_fn(timer_handler);
