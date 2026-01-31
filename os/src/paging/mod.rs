@@ -1,7 +1,7 @@
 //! Paging: structures and safe API over bootloader's page tables.
 //!
-//! Uses x86_64 types (PML4, PDPT, PD, PT via OffsetPageTable). All table/CR3
-//! changes are in `unsafe` blocks; public API is map_region and init.
+//! Stage 2A: AddressSpace as first-class object (id + root PML4). Wrapper
+//! around OffsetPageTable; kernel space identity-mapped in each AS.
 
 use bootloader_api::info::MemoryRegionKind;
 use x86_64::{
@@ -94,15 +94,83 @@ unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
     }
 }
 
-/// Thin wrapper: one address space = one page table (mapper). For Stage 2: per-process spaces.
+/// Opaque identifier for an address space. Stage 2A metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AddressSpaceId(pub u64);
+
+/// One address space = one root page table (PML4). Wrapper around OffsetPageTable.
+/// Kernel space is identity-mapped in each AS. No shared user mappings.
 pub struct AddressSpace {
-    pub mapper: OffsetPageTable<'static>,
+    pub id: AddressSpaceId,
+    root_frame: PhysFrame<Size4KiB>,
+}
+
+impl AddressSpace {
+    /// Returns a mapper for this address space. Caller must ensure the frame is
+    /// identity-mapped (physical = virtual) so the table is accessible.
+    ///
+    /// # Safety
+    /// Root frame must be identity-mapped in the current page tables.
+    #[inline]
+    pub unsafe fn mapper_mut(&mut self) -> OffsetPageTable<'_> {
+        let table = &mut *(self.root_frame.start_address().as_u64() as *mut PageTable);
+        OffsetPageTable::new(table, VirtAddr::new(0))
+    }
+
+    /// Physical frame of the root PML4 (for loading into CR3 on switch).
+    #[inline]
+    pub fn root_frame(&self) -> PhysFrame<Size4KiB> {
+        self.root_frame
+    }
 }
 
 /// Result of paging init: kernel address space and frame allocator.
 pub struct PagingState {
     pub kernel_space: AddressSpace,
     pub frame_allocator: BootInfoFrameAllocator,
+}
+
+/// Creates a new address space with kernel range identity-mapped. Allocates a new PML4
+/// and maps [kernel_start, kernel_end) as identity (virt = phys). No user mappings.
+///
+/// # Safety
+/// Caller must ensure kernel physical range is identity-mapped in the current tables
+/// so the new PML4 frame is accessible when building mappings.
+pub unsafe fn create_address_space(
+    id: AddressSpaceId,
+    frame_allocator: &mut BootInfoFrameAllocator,
+    kernel_start: u64,
+    kernel_end: u64,
+) -> Result<AddressSpace, PagingError> {
+    let root_frame = frame_allocator.allocate_frame().ok_or(PagingError::OutOfFrames)?;
+    let dst = root_frame.start_address().as_u64() as *mut u8;
+    unsafe { core::ptr::write_bytes(dst, 0, Size4KiB::SIZE as usize) };
+
+    let table = unsafe { &mut *(root_frame.start_address().as_u64() as *mut PageTable) };
+    let mut mapper = OffsetPageTable::new(table, VirtAddr::new(0));
+
+    let page_size = Size4KiB::SIZE;
+    let start_page = (kernel_start / page_size) * page_size;
+    let end_page = ((kernel_end + page_size - 1) / page_size) * page_size;
+
+    let flags = Flags::PRESENT | Flags::WRITABLE;
+    let mut addr = start_page;
+    while addr < end_page {
+        let page = Page::<Size4KiB>::containing_address(VirtAddr::new(addr));
+        let frame = PhysFrame::containing_address(PhysAddr::new(addr));
+        unsafe {
+            mapper
+                .map_to(page, frame, flags, frame_allocator)
+                .map_err(|_| PagingError::MapFailed)?
+                .flush();
+        }
+        addr += page_size;
+    }
+
+    Ok(AddressSpace {
+        id,
+        root_frame,
+    })
 }
 
 /// Returns the currently active PML4 (CR3). Localizes UB; Stage 2 can replace with clone PML4.
@@ -121,20 +189,20 @@ pub unsafe fn active_pml4() -> Result<&'static mut PageTable, PagingError> {
     Ok(unsafe { &mut *(pml4_phys.as_u64() as *mut PageTable) })
 }
 
-/// Initializes paging state using the current CR3 (bootloader's tables). Identity mapping.
+/// Initializes paging state: allocates kernel-owned PML4, copies bootloader tables into it,
+/// switches CR3 to it. Kernel space remains identity-mapped.
 ///
 /// # Safety
 /// Caller must ensure: paging is enabled, CR3 points to a valid PML4, and physical memory
 /// at the PML4 frame is identity-mapped so we can read/write page tables.
 pub unsafe fn init(boot_info: &'static bootloader_api::BootInfo) -> Result<PagingState, PagingError> {
     let level_4_table = active_pml4()?;
-    let mapper = unsafe { OffsetPageTable::new(level_4_table, VirtAddr::new(0)) };
 
     let kernel_start = boot_info.kernel_addr / Size4KiB::SIZE * Size4KiB::SIZE;
     let kernel_end = (boot_info.kernel_addr + boot_info.kernel_len + Size4KiB::SIZE - 1)
         / Size4KiB::SIZE
         * Size4KiB::SIZE;
-    let frame_allocator = unsafe {
+    let mut frame_allocator = unsafe {
         BootInfoFrameAllocator::new(
             boot_info.memory_regions.as_ref(),
             kernel_start,
@@ -142,8 +210,19 @@ pub unsafe fn init(boot_info: &'static bootloader_api::BootInfo) -> Result<Pagin
         )
     };
 
+    let kernel_root_frame = frame_allocator.allocate_frame().ok_or(PagingError::OutOfFrames)?;
+    let src = level_4_table as *const PageTable as *const u8;
+    let dst = kernel_root_frame.start_address().as_u64() as *mut u8;
+    unsafe { core::ptr::copy_nonoverlapping(src, dst, Size4KiB::SIZE as usize) };
+
+    let (_frame, flags) = Cr3::read();
+    Cr3::write(kernel_root_frame, flags);
+
     Ok(PagingState {
-        kernel_space: AddressSpace { mapper },
+        kernel_space: AddressSpace {
+            id: AddressSpaceId(0),
+            root_frame: kernel_root_frame,
+        },
         frame_allocator,
     })
 }
@@ -156,13 +235,16 @@ pub unsafe fn init(boot_info: &'static bootloader_api::BootInfo) -> Result<Pagin
 /// # Safety
 /// Unsafe: can create aliasing or invalid mappings if used incorrectly.
 #[allow(dead_code)]
-pub unsafe fn map_region(
-    mapper: &mut OffsetPageTable<'static>,
+pub unsafe fn map_region<M>(
+    mapper: &mut M,
     frame_allocator: &mut BootInfoFrameAllocator,
     virt_start: VirtAddr,
     size: u64,
     flags: Flags,
-) -> Result<(), PagingError> {
+) -> Result<(), PagingError>
+where
+    M: Mapper<Size4KiB>,
+{
     let page_count = (size + Size4KiB::SIZE - 1) / Size4KiB::SIZE;
     let start_page = Page::containing_address(virt_start);
     for i in 0..page_count {

@@ -340,16 +340,223 @@ Result: Kernel runs and handles timer interrupts.
 
 ### Stage 2 — Core Kernel Mechanisms
 
-Goal: A functional microkernel core.
+Goal: Build a minimal but correct microkernel core with strong isolation, preemptive multitasking, and controlled inter-process communication.
 
-Components:
-- Address space abstraction
-- Thread and process model
-- Preemptive scheduler
-- Basic IPC (message passing)
-- Initial capability table design
+This stage is intentionally split into three sub-stages to avoid architectural coupling and uncontrolled complexity growth.
 
-Result: Multiple isolated processes communicating via IPC.
+---
+
+## Stage 2A — Execution & Isolation Primitives
+
+Goal: Establish fundamental execution units and memory isolation without introducing scheduling policy or IPC.
+
+### Components
+
+#### Address Space Abstraction
+- Introduce `AddressSpace` as a first-class kernel object.
+- Each address space owns exactly one root page table (PML4).
+- Kernel space is mapped into all address spaces (higher-half mapping).
+- User space mappings are fully isolated per address space.
+
+Constraints:
+- No shared user mappings.
+- No lazy mapping or copy-on-write.
+- No demand paging.
+
+Result:
+- Kernel can create, destroy, and switch address spaces safely.
+
+---
+
+#### Thread Abstraction
+- Introduce `Thread` as the minimal execution unit.
+- A thread consists of:
+  - CPU register context
+  - Kernel stack
+  - Associated address space
+- Threads are independent of scheduling policy.
+
+Constraints:
+- No priorities.
+- No signals.
+- No TLS.
+- No user-visible thread API.
+
+Result:
+- Kernel can create threads bound to specific address spaces.
+
+---
+
+#### Context Switching
+- Implement low-level context switch routine.
+- Switching includes:
+  - Saving/restoring CPU registers
+  - Switching CR3
+  - Correct return via `iretq`
+
+Constraints:
+- No scheduler logic inside context switch.
+- No preemption logic.
+
+Result:
+- Kernel can explicitly switch execution between threads.
+
+---
+
+### Stage 2A Result
+- Multiple threads exist.
+- Each thread executes in its own address space.
+- Manual context switching is functional and stable.
+
+---
+
+## Stage 2B — Scheduling & Time
+
+Goal: Introduce preemptive multitasking driven by timer interrupts, without IPC or high-level policies.
+
+### Components
+
+#### Thread States
+- Define thread lifecycle states:
+  - Runnable
+  - Running
+  - Blocked
+  - Dead
+
+Constraints:
+- Blocked state has no reason attached.
+- No sleeping or timeouts.
+
+---
+
+#### Scheduler Core
+- Implement a minimal preemptive scheduler.
+- Single run queue.
+- Round-robin scheduling.
+- One CPU only (no SMP support).
+
+Constraints:
+- No priorities.
+- No load balancing.
+- No per-core queues.
+
+---
+
+#### Timer-Driven Preemption
+- Use hardware timer interrupt to trigger scheduling.
+- Timer interrupt handler must:
+  - Save current thread state
+  - Invoke scheduler
+  - Switch to next runnable thread
+
+---
+
+#### Preemption Control
+- Introduce per-CPU preemption disable counter.
+- Kernel critical sections must explicitly disable preemption.
+- Interrupt disable is not a substitute for scheduler locking.
+
+Constraints:
+- No fine-grained locking model yet.
+
+---
+
+### Stage 2B Result
+- Threads are preempted by timer interrupts.
+- Kernel executes multiple threads safely.
+- Scheduler is isolated from IPC and resource management logic.
+
+---
+
+## Stage 2C — IPC & Capability Core
+
+Goal: Enable controlled communication and authority transfer between isolated execution contexts.
+
+### Components
+
+#### IPC Model
+- Implement synchronous, blocking message passing.
+- IPC operations:
+  - `send(endpoint, message)`
+  - `recv(endpoint)`
+
+Constraints:
+- No asynchronous IPC.
+- No message queues.
+- One sender and one receiver per endpoint.
+
+---
+
+#### IPC Messages
+- Messages consist of:
+  - Fixed-size word payload
+  - Optional capability transfers
+
+Constraints:
+- No variable-sized messages.
+- No shared memory payloads.
+
+---
+
+#### Endpoint Object
+- Introduce `Endpoint` as an IPC rendezvous point.
+- Endpoint holds:
+  - At most one waiting sender
+  - At most one waiting receiver
+
+Constraints:
+- One-to-one communication only.
+- No broadcast or multicast.
+
+---
+
+#### Thread Blocking Semantics
+- IPC operations directly manipulate thread states:
+  - Sending thread blocks if no receiver.
+  - Receiving thread blocks if no sender.
+  - Successful match unblocks both.
+
+---
+
+#### Capability System (Initial Version)
+- Introduce typed capabilities as unforgeable kernel references.
+- Supported capability types:
+  - Thread
+  - AddressSpace
+  - Endpoint
+
+Constraints:
+- No capability copying.
+- No revocation.
+- No delegation hierarchy.
+- Capabilities can only be transferred via IPC.
+
+---
+
+### Stage 2C Result
+- Multiple isolated processes communicate exclusively via IPC.
+- Authority is explicitly represented and transferred.
+- Kernel has no ambient authority outside capabilities.
+
+---
+
+## Overall Stage 2 Result
+
+- Fully isolated address spaces.
+- Preemptive multitasking.
+- Synchronous IPC as the sole communication mechanism.
+- Minimal capability-based security model.
+
+Out of Scope:
+- Shared memory
+- Filesystems
+- Drivers
+- SMP
+- Advanced scheduling policies
+- Capability revocation
+
+This stage establishes a clean, minimal microkernel foundation suitable for controlled extension in later stages.
+
 
 ---
 
