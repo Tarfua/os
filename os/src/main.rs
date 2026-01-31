@@ -28,5 +28,8 @@ fn kernel_main(boot_info: &'static mut bootloader_api::BootInfo) -> ! {
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    loop {}
+    serial::write_str("KERNEL PANIC\n");
+    loop {
+        x86_64::instructions::hlt();
+    }
 }
