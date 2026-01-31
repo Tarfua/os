@@ -1,0 +1,9 @@
+[package]
+name = "os"
+version = "0.1.0"
+edition = "2021"
+description = "Microkernel OS (Stage 1: bare-metal skeleton)"
+
+[dependencies]
+bootloader_api = "0.11"
+x86_64 = { version = "0.15", features = ["abi_x86_interrupt"] }

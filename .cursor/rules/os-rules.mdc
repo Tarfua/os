@@ -1,0 +1,458 @@
+---
+alwaysApply: true
+---
+
+# Next-Generation General Purpose OS Architecture (Linux-Inspired, Clean-Slate Design)
+
+## 1. Design Goals
+
+1. Security-first by architecture, not add-ons  
+2. Strong isolation between components (fault & compromise containment)  
+3. High performance on servers *and* low-latency desktops  
+4. Hardware vendor–friendly driver model  
+5. Long-term maintainability (controlled complexity growth)  
+6. Backward compatibility with POSIX as a *layer*, not a constraint  
+
+---
+
+## 2. High-Level Architecture Overview
+
+```
++-----------------------------------------------------------+
+|                    User Applications                      |
+|  (POSIX layer, native apps, containers, runtimes)         |
++---------------------------+-------------------------------+
+|        System Services    |     Compatibility Services    |
+| (FS mgr, net mgr, policy) | (POSIX, legacy Linux ABI)     |
++---------------------------+-------------------------------+
+|        User-Space Drivers & Subsystems (Isolated)         |
+|  Filesystems | Network stacks | GPU | USB | Storage       |
++---------------------------+-------------------------------+
+|            Microkernel Core (Minimal Trusted Base)        |
+|  Scheduler | IPC | Memory Mgmt | Capabilities | IOMMU     |
++-----------------------------------------------------------+
+|                         Hardware                          |
++-----------------------------------------------------------+
+```
+
+---
+
+## 3. Kernel Architecture
+
+### 3.1 Microkernel Core Responsibilities Only
+
+The kernel must be **small, auditable, and stable**. It contains only:
+
+- Thread scheduling (preemptive, priority & latency aware)
+- Virtual memory management (address spaces, mapping, paging)
+- Inter-process communication (fast, capability-checked IPC)
+- Capability-based security enforcement
+- Interrupt routing and basic hardware abstraction
+- IOMMU management for DMA isolation
+
+Everything else runs outside the kernel.
+
+### 3.2 What Is Explicitly NOT in the Kernel
+
+- Filesystem implementations  
+- Network protocol stacks  
+- Device drivers  
+- Graphics stacks  
+- USB/Bluetooth stacks  
+
+These live in isolated user-space services.
+
+---
+
+## 4. Security Model (Foundational)
+
+### 4.1 No Global "root"
+
+There is **no all-powerful superuser**.
+
+Instead:
+- Every process runs with a set of **capabilities**
+- Capabilities are unforgeable tokens granting specific rights:
+  - Access to a device
+  - Ability to map memory
+  - Permission to talk to a service
+  - Network binding rights
+
+If a process does not have a capability, the operation is impossible.
+
+### 4.2 Capability Properties
+
+- Fine-grained (not “admin vs user”)
+- Delegatable (a process can pass limited rights to another)
+- Revocable (system can withdraw rights)
+- Namespaced (containers = capability subsets)
+
+### 4.3 Mandatory Isolation by Default
+
+- Every service runs in its own address space
+- Drivers cannot access arbitrary memory
+- Filesystem services cannot access raw devices without explicit capability
+- Network stacks cannot read files unless granted
+
+---
+
+## 5. Driver Model
+
+### 5.1 Drivers Run in User Space
+
+All drivers are isolated processes:
+
+- One driver crash ≠ system crash
+- Compromised driver cannot directly own the kernel
+- Drivers communicate with the kernel via IPC
+
+### 5.2 Hardware Access Rules
+
+- DMA only via IOMMU mappings explicitly granted
+- No direct physical memory access outside assigned regions
+- Interrupts delivered to driver processes through kernel mediation
+
+### 5.3 Stable Driver ABI
+
+The OS provides:
+
+- Versioned, stable driver interface
+- Long-term binary compatibility for drivers
+- Strict interface boundaries to prevent kernel coupling
+
+This encourages hardware vendor support.
+
+---
+
+## 6. Filesystem Architecture
+
+### 6.1 Filesystems as Services
+
+Each filesystem is a separate user-space server:
+
+- Local FS (e.g., modern CoW FS)
+- Network FS
+- Encrypted FS layers
+
+They expose a unified VFS protocol to the system.
+
+### 6.2 Structured Kernel Interface (No Text Pseudo-Files)
+
+No `/proc` or `/sys` text parsing.
+
+Instead:
+- Typed system calls
+- Structured queries
+- Versioned object models
+
+---
+
+## 7. Networking Architecture
+
+### 7.1 Network Stacks in User Space
+
+- Multiple network stacks can coexist (performance vs security variants)
+- Crashes in network code do not crash the kernel
+- Sandboxed protocol implementations
+
+### 7.2 Secure by Default
+
+- Raw packet access requires explicit capability
+- Network services run with minimal privileges
+- Fine-grained firewalling integrated with capability model
+
+---
+
+## 8. Process & IPC Model
+
+### 8.1 IPC Is the Core Primitive
+
+Everything is a service accessed via IPC:
+
+- Filesystem operations
+- Device control
+- Network communication
+- System management
+
+IPC must be:
+- Fast (shared memory + message passing)
+- Capability-checked
+- Observable for debugging
+
+### 8.2 Service-Oriented OS
+
+The OS behaves like a set of cooperating, isolated services rather than a monolithic blob.
+
+---
+
+## 9. Scheduling & Performance
+
+### 9.1 Latency-Aware Scheduler
+
+Scheduler designed for:
+
+- Low-latency UI threads
+- Real-time audio/video
+- VR/AR workloads
+- Traditional server throughput
+
+Priority inheritance and deadline scheduling are first-class.
+
+### 9.2 Performance Strategy
+
+- Critical paths optimized with shared memory IPC
+- Zero-copy data paths where safe
+- User-space drivers allowed with fast kernel bypass mechanisms under strict control
+
+---
+
+## 10. Memory Safety Strategy
+
+### 10.1 Safe Languages by Default
+
+- Kernel written in a memory-safe systems language (e.g., Rust-like)
+- Drivers strongly encouraged or required to use safe languages
+- Unsafe code isolated and audited
+
+### 10.2 Containing Unsafe Components
+
+If unsafe code exists:
+- It runs in isolated processes
+- Damage is limited by capabilities and memory boundaries
+
+---
+
+## 11. Compatibility Layers
+
+### 11.1 POSIX Compatibility as a Service
+
+A dedicated compatibility layer provides:
+
+- POSIX syscalls
+- Traditional process model
+- Signals, fork/exec semantics
+
+Internally, these map to the new kernel primitives.
+
+### 11.2 Legacy Linux ABI Layer (Optional)
+
+A containerized compatibility subsystem may run:
+
+- Recompiled Linux binaries
+- Legacy software stacks
+
+Without polluting the core architecture.
+
+---
+
+## 12. System Management Philosophy
+
+- Core kernel: minimal, rarely changing, highly verified
+- Most innovation happens in replaceable user-space services
+- System components can be restarted independently
+- Observability and introspection built into IPC and capability systems
+
+---
+
+## 13. Development & Testing Strategy (QEMU-Centric)
+
+### 13.1 Primary Test Platform: QEMU
+
+QEMU is the main development environment from the first boot instruction to a multi-service OS.
+
+**Why QEMU is critical:**
+- Hardware-independent early bring-up
+- Full system emulation (CPU, memory, interrupts, devices)
+- GDB remote debugging of kernel code
+- Snapshotting and deterministic test setups
+- CI-friendly automated boot testing
+
+### 13.2 Early Boot Workflow
+
+1. UEFI firmware (OVMF) used with QEMU  
+2. Kernel loaded as an EFI application or via custom bootloader  
+3. Serial output (`-serial stdio`) used as the primary debug channel  
+
+Example launch pattern:
+
+```
+qemu-system-x86_64 \
+  -machine q35 \
+  -cpu qemu64 \
+  -m 512M \
+  -serial stdio \
+  -drive if=pflash,format=raw,readonly=on,file=OVMF_CODE.fd \
+  -drive format=raw,file=os.img
+```
+
+### 13.3 Kernel Debugging
+
+QEMU supports source-level kernel debugging:
+
+```
+qemu-system-x86_64 -s -S ...
+```
+
+- `-S` pauses CPU at startup  
+- `-s` opens a GDB server on port 1234  
+
+This allows:
+- Breakpoints in kernel code  
+- Step-by-step execution  
+- Register and memory inspection  
+
+This is essential during:
+- Memory manager bring-up  
+- Scheduler debugging  
+- IPC correctness validation  
+
+### 13.4 Automated Testing
+
+QEMU instances can be scripted to:
+- Boot the OS
+- Run a test service
+- Report success via serial output
+
+This enables regression testing of:
+- IPC semantics
+- Capability enforcement
+- Scheduler fairness
+- Memory isolation
+
+---
+
+## 14. Microkernel Development Roadmap
+
+### Stage 1 — Bare-Metal Kernel Skeleton
+
+Goal: Reach a stable execution environment.
+
+Components:
+- UEFI boot
+- Long mode setup
+- Interrupt descriptor table
+- Basic physical and virtual memory mapping
+- Serial debug output
+
+Result: Kernel runs and handles timer interrupts.
+
+---
+
+### Stage 2 — Core Kernel Mechanisms
+
+Goal: A functional microkernel core.
+
+Components:
+- Address space abstraction
+- Thread and process model
+- Preemptive scheduler
+- Basic IPC (message passing)
+- Initial capability table design
+
+Result: Multiple isolated processes communicating via IPC.
+
+---
+
+### Stage 3 — Capability Enforcement
+
+Goal: Security model becomes real.
+
+Components:
+- Capability objects in kernel
+- Per-process capability spaces
+- Capability transfer via IPC
+- Access checks on all kernel operations
+
+Result: No operation without explicit authority.
+
+---
+
+### Stage 4 — First User-Space System Services
+
+Goal: Move policy out of kernel.
+
+Services:
+- Root system service (process spawning and capability distribution)
+- Memory management policy service
+- Logging/console service
+
+Result: Kernel only provides mechanisms; services define behavior.
+
+---
+
+### Stage 5 — User-Space Driver Framework
+
+Goal: Hardware access without kernel bloat.
+
+Components:
+- Interrupt delivery to user space
+- IOMMU-backed DMA isolation
+- Driver IPC interfaces
+
+First drivers:
+- Serial
+- Timer
+- RAM-backed block device
+
+Result: Drivers can crash without crashing the system.
+
+---
+
+### Stage 6 — Filesystem Service
+
+Goal: Persistent storage outside the kernel.
+
+Components:
+- VFS protocol over IPC
+- RAM filesystem
+- Block device integration
+
+Result: Files are managed entirely in user space.
+
+---
+
+### Stage 7 — Networking Stack
+
+Goal: Safe and replaceable networking.
+
+Components:
+- NIC driver in user space
+- User-space TCP/IP stack
+- Capability-controlled socket service
+
+Result: Network failures do not compromise kernel stability.
+
+---
+
+### Stage 8 — POSIX Compatibility Layer
+
+Goal: Practical software ecosystem support.
+
+Components:
+- POSIX syscall translation service
+- Process model emulation
+- Filesystem and socket mapping to native services
+
+Result: Unix-style applications run without polluting kernel design.
+
+---
+
+## 15. Summary Philosophy
+
+This system keeps from Linux:
+
+- Unix process model (via compatibility)
+- File and socket abstractions
+- Open ecosystem and modularity
+
+But fixes at the root:
+
+- No monolithic trusted driver code
+- No global superuser
+- No text-based kernel control hacks
+- No assumption that hardware or drivers are trustworthy
+
+It is designed for a world where:
+- Devices are hostile
+- Isolation is mandatory
+- Security and reliability outrank historical convenience

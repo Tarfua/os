@@ -1,0 +1,8 @@
+/target/
+/os.img
+*.log
+*.fd
+.env
+*.swp
+*.swo
+*~
