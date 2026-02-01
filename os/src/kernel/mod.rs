@@ -38,18 +38,23 @@ pub fn early_init(
 
     // GDT / IDT initialization
     crate::gdt::init();
-    crate::kernel::idt::init();
+    serial::write_str("GDT loaded\n");
+
+    // Paging initialization
 
     let paging = unsafe { crate::paging::init(boot_info) }
-        .map_err(|_| KernelInitError::PagingInitFailed)?;
-
+    .map_err(|_| KernelInitError::PagingInitFailed)?;
     serial::write_str("paging: init OK (bootloader tables)\n");
+
+    // IDT initialization
+    crate::kernel::idt::init();
+    serial::write_str("IDT loaded\n");
 
     // PIC / PIT initialization
     crate::pic::init();
     crate::pit::init();
     interrupts::enable();
-    serial::write_str("IDT loaded; PIT 100 Hz; timer enabled\n");
+    serial::write_str("PIC / PIT initialized; PIT 100 Hz; timer enabled\n");
 
     Ok(KernelState {
         paging,

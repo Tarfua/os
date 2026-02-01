@@ -198,6 +198,12 @@ impl AddressSpace {
             MapType::Identity,
         )
     }
+
+    /// Returns a Mapper for this AddressSpace
+    #[inline]
+    pub unsafe fn mapper(&mut self) -> OffsetPageTable<'_> {
+        self.pt_root.mapper()
+    }
 }
 
 // Stage 2B+: Will add Drop implementation to deallocate page tables
