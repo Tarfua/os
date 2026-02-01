@@ -1,7 +1,9 @@
 use x86_64::instructions::interrupts;
 use crate::paging::PagingState;
 use bootloader_api::BootInfo;
-use crate::serial;         
+use crate::serial;
+
+mod idt;
 
 pub enum KernelInitError {
     PagingInitFailed,
@@ -36,7 +38,7 @@ pub fn early_init(
 
     // GDT / IDT initialization
     crate::gdt::init();
-    crate::idt::init();
+    crate::kernel::idt::init();
 
     let paging = unsafe { crate::paging::init(boot_info) }
         .map_err(|_| KernelInitError::PagingInitFailed)?;
