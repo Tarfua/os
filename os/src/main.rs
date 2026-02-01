@@ -6,8 +6,6 @@
 mod kernel;
 mod long_mode;
 mod paging;
-mod pic;
-mod pit;
 mod serial;
 
 use core::panic::PanicInfo;
