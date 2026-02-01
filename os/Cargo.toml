@@ -2,7 +2,7 @@
 name = "os"
 version = "0.1.0"
 edition = "2021"
-description = "Microkernel OS (Stage 1: bare-metal skeleton)"
+description = "Microkernel OS"
 
 [dependencies]
 bootloader_api = "0.11"

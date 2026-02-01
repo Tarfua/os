@@ -19,7 +19,7 @@ pub fn early_init(
     boot_info: &'static BootInfo,
 ) -> Result<KernelState, KernelInitError> {
     serial::init();
-    serial::write_str("Stage 1: kernel running\n");
+    serial::write_str("Kernel is running\n");
 
     if crate::long_mode::is_long_mode() {
         serial::write_str("64-bit long mode\n");
