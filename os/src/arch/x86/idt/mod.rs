@@ -6,9 +6,10 @@
 pub mod handlers;
 pub mod storage;
 
-use crate::kernel::idt::handlers::*;
-use crate::kernel::idt::storage::*;
+use crate::arch::x86::idt::handlers::*;
+use crate::arch::x86::idt::storage::*;
 use x86_64::structures::idt::InterruptDescriptorTable;
+use crate::arch::x86::gdt::DF_IST_INDEX;
 use crate::serial;
 
 /// Initialize Interrupt Descriptor Table
@@ -28,7 +29,6 @@ pub fn init() {
         
         serial::write_str("Loading IDT...\n");
         idt.load();
-        serial::write_str("IDT loaded\n");
     }
 }
 
@@ -49,7 +49,7 @@ unsafe fn install_exception_handlers(idt: &mut InterruptDescriptorTable) {
     // Double fault with dedicated stack
     idt.double_fault                                                          // 8: #DF
         .set_handler_fn(double_fault_handler)
-        .set_stack_index(crate::kernel::gdt::DF_IST_INDEX);
+        .set_stack_index(DF_IST_INDEX);
     
     // More exceptions
     idt.invalid_tss.set_handler_fn(invalid_tss_handler);                      // 10: #TS

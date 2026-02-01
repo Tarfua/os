@@ -4,10 +4,9 @@
 #![feature(abi_x86_interrupt)]
 
 mod kernel;
+mod arch;
 mod long_mode;
 mod paging;
-mod pic;
-mod pit;
 mod serial;
 
 use core::panic::PanicInfo;
