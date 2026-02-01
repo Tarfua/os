@@ -17,9 +17,30 @@ extern "x86-interrupt" fn divide_error_handler(_frame: InterruptStackFrame) {
     crate::serial::write_str("divide error\n");
 }
 
-extern "x86-interrupt" fn double_fault_handler(_frame: InterruptStackFrame, _code: u64) -> ! {
-    crate::serial::write_str("double fault\n");
-    loop {}
+extern "x86-interrupt" fn double_fault_handler(
+    frame: InterruptStackFrame,
+    error_code: u64,
+) -> ! {
+    use x86_64::instructions::interrupts;
+    interrupts::disable();
+
+    crate::serial::write_str("\n=== DOUBLE FAULT ===\n");
+    crate::serial::write_str("System halted\n");
+
+    crate::serial::write_str("RIP=");
+    crate::serial::write_u64_hex(frame.instruction_pointer.as_u64());
+    crate::serial::write_str("RSP=");
+    crate::serial::write_u64_hex(frame.stack_pointer.as_u64());
+    crate::serial::write_str("RFLAGS=");
+    crate::serial::write_u64_hex(frame.cpu_flags.bits());
+    crate::serial::write_str("CS=");
+    crate::serial::write_u16_hex(frame.code_segment.0);
+    crate::serial::write_str("SS=");
+    crate::serial::write_u16_hex(frame.stack_segment.0);
+    crate::serial::write_str("ERR=");
+    crate::serial::write_u64_hex(error_code);
+
+    loop { x86_64::instructions::hlt(); }
 }
 
 extern "x86-interrupt" fn breakpoint_handler(frame: InterruptStackFrame) {
@@ -40,26 +61,27 @@ extern "x86-interrupt" fn timer_handler(_frame: InterruptStackFrame) {
 }
 
 extern "x86-interrupt" fn page_fault_handler(
-    stack_frame: InterruptStackFrame,
+    frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
 ) {
-    // Get physical address, or 0 if error
+    use x86_64::instructions::interrupts;
+
+    interrupts::disable();
+
     let fault_addr = match Cr2::read() {
         Ok(addr) => addr.as_u64(),
         Err(_) => 0,
     };
 
-    crate::serial::write_str("\nPAGE FAULT!\n");
-    crate::serial::write_fmt(format_args!(
-        "Accessed address: {:#x}\nError code: {:?}\nInstruction at: {:#x}\n",
-        fault_addr,
-        error_code,
-        stack_frame.instruction_pointer.as_u64()
-    ));
+    crate::serial::write_str("\n=== PAGE FAULT ===\n");
+    crate::serial::write_str("Fault addr=");
+    crate::serial::write_u64_hex(fault_addr);
+    crate::serial::write_str("RIP=");
+    crate::serial::write_u64_hex(frame.instruction_pointer.as_u64());
+    crate::serial::write_str("ERR=");
+    crate::serial::write_u64_hex(error_code.bits());
 
-    loop {
-        x86_64::instructions::hlt();
-    }
+    loop { x86_64::instructions::hlt(); }
 }
 
 /// Fills IDT with handlers and loads it. Call after gdt::init().

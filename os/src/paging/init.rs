@@ -1,9 +1,8 @@
-//! Paging subsystem initialization
+//! Paging subsystem initialization (DF-safe, modular, Linux-like)
 
 use super::{AddressSpace, AddressSpaceId, EarlyFrameAllocator, PagingResult};
 use bootloader_api::BootInfo;
 use crate::serial;
-use core::fmt::Write;
 use x86_64::{registers::control::Cr3, VirtAddr};
 
 /// Result of paging initialization
@@ -16,9 +15,6 @@ pub struct PagingState {
 
 /// Initializes paging subsystem using bootloader's page tables.
 ///
-/// Stage 2A: Reuse bootloader's PML4 as kernel address space
-/// Stage 2B+: May create fresh kernel PML4
-///
 /// # Safety
 /// - Paging must be enabled
 /// - CR3 must point to valid PML4
@@ -27,72 +23,73 @@ pub unsafe fn init(boot_info: &'static BootInfo) -> PagingResult<PagingState> {
     let kernel_start = boot_info.kernel_addr;
     let kernel_end = boot_info.kernel_addr + boot_info.kernel_len;
 
-    let kernel_offset = match boot_info.physical_memory_offset {
-        bootloader_api::info::Optional::Some(addr) => VirtAddr::new(addr),
-        bootloader_api::info::Optional::None => {
-            let _ = writeln!(crate::serial::Writer, "No physical_memory_offset, defaulting to 0");
-            VirtAddr::new(0)
-        },
-    };
+    let kernel_offset = get_kernel_offset(boot_info);
 
-    // Boot type detection
-    serial::write_fmt(format_args!(
-        "Boot type: {}\n",
-        if let bootloader_api::info::Optional::Some(_) = &boot_info.framebuffer {
-            "UEFI"
-        } else {
-            "BIOS"
-        }
-    ));
-
-    // Boot type
-    match &boot_info.framebuffer {
-        bootloader_api::info::Optional::Some(_) => {
-            let _ = writeln!(crate::serial::Writer, "Boot type: UEFI");
-        }
-        bootloader_api::info::Optional::None => {
-            let _ = writeln!(crate::serial::Writer, "Boot type: BIOS");
-        }
-    }
-
-    // Framebuffer log
-    if let bootloader_api::info::Optional::Some(fb) = &boot_info.framebuffer {
-        let info = fb.info(); // виклик методу, а не прямий доступ
-        serial::write_fmt(format_args!(
-            "Framebuffer: {}x{}, {} bytes/pixel\n",
-            info.width,
-            info.height,
-            info.bytes_per_pixel
-        ));
-    }
-
-    // memory_regions sanity check
-    if boot_info.memory_regions.is_empty() {
-        let _ = writeln!(crate::serial::Writer, "WARNING: memory_regions empty!");
-    }
+    log_framebuffer_info(boot_info);
+    check_memory_regions(boot_info);
 
     let frame_allocator =
         EarlyFrameAllocator::new(&boot_info.memory_regions, kernel_start, kernel_end);
 
     let (current_pml4_frame, _) = Cr3::read();
 
-    let _ = writeln!(
-        crate::serial::Writer,
-        "=== Paging Init ===\nkernel: 0x{:x}-0x{:x}\nkernel_offset: 0x{:x}\nUsing bootloader PML4: 0x{:x}",
-        kernel_start,
-        kernel_end,
-        kernel_offset.as_u64(),
-        current_pml4_frame.start_address().as_u64()
-    );
+    let pml4_virt_addr: u64 = (kernel_offset + current_pml4_frame.start_address().as_u64()).as_u64();
+    log_paging_info(kernel_start, kernel_end, kernel_offset, pml4_virt_addr);
 
     let kernel_space = AddressSpace::from_existing(
         AddressSpaceId::KERNEL,
         current_pml4_frame,
         kernel_offset,
     );
-    
+
     Ok(PagingState {
         kernel_space,
         frame_allocator,
     })
+}
+
+/// Get physical memory offset safely
+fn get_kernel_offset(boot_info: &BootInfo) -> VirtAddr {
+    match boot_info.physical_memory_offset {
+        bootloader_api::info::Optional::Some(addr) => VirtAddr::new(addr),
+        bootloader_api::info::Optional::None => {
+            serial::write_str("WARNING: No physical_memory_offset, defaulting to 0\n");
+            VirtAddr::new(0)
+        }
+    }
+}
+
+/// Log framebuffer info if available
+fn log_framebuffer_info(boot_info: &BootInfo) {
+    if let bootloader_api::info::Optional::Some(fb) = &boot_info.framebuffer {
+        let info = fb.info();
+        serial::write_str("Framebuffer: ");
+        serial::write_u64_hex(info.width as u64);
+        serial::write_str("x");
+        serial::write_u64_hex(info.height as u64);
+        serial::write_str(", bytes/pixel=");
+        serial::write_u64_hex(info.bytes_per_pixel as u64);
+        serial::write_str("\n");
+    }
+}
+
+/// Sanity check memory regions
+fn check_memory_regions(boot_info: &BootInfo) {
+    if boot_info.memory_regions.is_empty() {
+        serial::write_str("WARNING: memory_regions empty!\n");
+    }
+}
+
+/// Log kernel and paging info (safe for DF)
+fn log_paging_info(kernel_start: u64, kernel_end: u64, kernel_offset: VirtAddr, pml4_base: u64) {
+    serial::write_str("=== Paging Init ===\n");
+    serial::write_str("kernel_start=");
+    serial::write_u64_hex(kernel_start);
+    serial::write_str("\nkernel_end=");
+    serial::write_u64_hex(kernel_end);
+    serial::write_str("\nkernel_offset=");
+    serial::write_u64_hex(kernel_offset.as_u64());
+    serial::write_str("\nbootloader PML4=");
+    serial::write_u64_hex(pml4_base);
+    serial::write_str("\n");
 }

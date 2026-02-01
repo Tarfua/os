@@ -62,3 +62,23 @@ pub fn write_fmt(args: core::fmt::Arguments) {
     let mut w = Writer;
     let _ = w.write_fmt(args);
 }
+
+/// Write u64 as hex (0x1234abcd) without using format_args
+pub fn write_u64_hex(n: u64) {
+    const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
+    crate::serial::write_str("0x");
+    let mut started = false;
+    for i in (0..16).rev() {
+        let digit = ((n >> (i * 4)) & 0xF) as u8;
+        if digit != 0 || started || i == 0 {
+            crate::serial::write_byte(HEX_CHARS[digit as usize]);
+            started = true;
+        }
+    }
+    crate::serial::write_str("\n");
+}
+
+/// Write u16 as hex
+pub fn write_u16_hex(n: u16) {
+    write_u64_hex(n as u64);
+}
