@@ -1,8 +1,8 @@
 use x86_64::structures::idt::{InterruptStackFrame, PageFaultErrorCode};
 use x86_64::registers::control::Cr2;
-use crate::kernel::idt::storage::*;
-use core::sync::atomic::Ordering;
+use crate::kernel::arch::x86::idt::storage::*;
 use crate::kernel::arch::x86::pic;
+use core::sync::atomic::Ordering;
 
 // === Exception handlers ===
 pub extern "x86-interrupt" fn divide_error_handler(_frame: InterruptStackFrame) {
