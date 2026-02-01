@@ -3,7 +3,6 @@
 #![allow(dead_code)]
 #![feature(abi_x86_interrupt)]
 
-mod gdt;
 mod kernel;
 mod long_mode;
 mod paging;

@@ -4,6 +4,7 @@ use bootloader_api::BootInfo;
 use crate::serial;
 
 mod idt;
+mod gdt;
 
 pub enum KernelInitError {
     PagingInitFailed,
@@ -37,7 +38,7 @@ pub fn early_init(
     }
 
     // GDT / IDT initialization
-    crate::gdt::init();
+    crate::kernel::gdt::init();
     serial::write_str("GDT loaded\n");
 
     // Paging initialization

@@ -49,7 +49,7 @@ unsafe fn install_exception_handlers(idt: &mut InterruptDescriptorTable) {
     // Double fault with dedicated stack
     idt.double_fault                                                          // 8: #DF
         .set_handler_fn(double_fault_handler)
-        .set_stack_index(crate::gdt::DF_IST_INDEX);
+        .set_stack_index(crate::kernel::gdt::DF_IST_INDEX);
     
     // More exceptions
     idt.invalid_tss.set_handler_fn(invalid_tss_handler);                      // 10: #TS
