@@ -6,10 +6,10 @@
 pub mod handlers;
 pub mod storage;
 
-use crate::kernel::arch::x86::idt::handlers::*;
-use crate::kernel::arch::x86::idt::storage::*;
+use crate::arch::x86::idt::handlers::*;
+use crate::arch::x86::idt::storage::*;
 use x86_64::structures::idt::InterruptDescriptorTable;
-use crate::kernel::arch::x86::gdt::DF_IST_INDEX;
+use crate::arch::x86::gdt::DF_IST_INDEX;
 use crate::serial;
 
 /// Initialize Interrupt Descriptor Table

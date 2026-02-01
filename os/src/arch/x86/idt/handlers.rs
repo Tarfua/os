@@ -1,7 +1,7 @@
 use x86_64::structures::idt::{InterruptStackFrame, PageFaultErrorCode};
 use x86_64::registers::control::Cr2;
-use crate::kernel::arch::x86::idt::storage::*;
-use crate::kernel::arch::x86::pic;
+use crate::arch::x86::idt::storage::*;
+use crate::arch::x86::pic;
 use core::sync::atomic::Ordering;
 
 // === Exception handlers ===

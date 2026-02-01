@@ -35,7 +35,7 @@ pub fn early_init(
     }
 
     // GDT / IDT initialization
-    crate::kernel::arch::x86::gdt::init();
+    crate::arch::x86::gdt::init();
     serial::write_str("GDT loaded\n");
 
     // Paging initialization
@@ -45,12 +45,12 @@ pub fn early_init(
     serial::write_str("paging: init OK (bootloader tables)\n");
 
     // IDT initialization
-    crate::kernel::arch::x86::idt::init();
+    crate::arch::x86::idt::init();
     serial::write_str("IDT loaded\n");
 
     // PIC / PIT initialization
-    crate::kernel::arch::x86::pic::init();
-    crate::kernel::arch::x86::pit::init();
+    crate::arch::x86::pic::init();
+    crate::arch::x86::pit::init();
     interrupts::enable();
     serial::write_str("PIC / PIT initialized; PIT 100 Hz; timer enabled\n");
 
