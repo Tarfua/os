@@ -2,6 +2,7 @@ use x86_64::structures::idt::{InterruptStackFrame, PageFaultErrorCode};
 use x86_64::registers::control::Cr2;
 use crate::kernel::idt::storage::*;
 use core::sync::atomic::Ordering;
+use crate::kernel::arch::x86::pic;
 
 // === Exception handlers ===
 pub extern "x86-interrupt" fn divide_error_handler(_frame: InterruptStackFrame) {
@@ -81,7 +82,7 @@ pub extern "x86-interrupt" fn page_fault_handler(
 // === Timer handler ===
 pub extern "x86-interrupt" fn timer_handler(_frame: InterruptStackFrame) {
     on_timer_tick();
-    crate::pic::notify_end_of_interrupt();
+    pic::notify_end_of_interrupt(pic::IRQ_TIMER);
 }
 
 fn on_timer_tick() {
@@ -94,7 +95,7 @@ fn on_timer_tick() {
 // === Keyboard IRQ ===
 pub extern "x86-interrupt" fn keyboard_handler(_frame: InterruptStackFrame) {
     crate::serial::write_str("=== KEYBOARD IRQ ===\n");
-    crate::pic::notify_end_of_interrupt();
+    pic::notify_end_of_interrupt(pic::IRQ_KEYBOARD);
 }
 
 // === Generic Exception Stub for unused exceptions ===
@@ -117,5 +118,5 @@ stub!(device_not_available_handler);
 // === Generic unexpected handler ===
 pub extern "x86-interrupt" fn unexpected_interrupt_handler(_frame: InterruptStackFrame) {
     crate::serial::write_str("=== UNEXPECTED INTERRUPT ===\n");
-    crate::pic::notify_end_of_interrupt();
+    pic::notify_end_of_interrupt(pic::IRQ_UNKNOWN);
 }

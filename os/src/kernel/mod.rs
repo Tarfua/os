@@ -3,6 +3,7 @@ use crate::paging::PagingState;
 use bootloader_api::BootInfo;
 use crate::serial;
 
+mod arch;
 mod idt;
 mod gdt;
 
@@ -52,8 +53,8 @@ pub fn early_init(
     serial::write_str("IDT loaded\n");
 
     // PIC / PIT initialization
-    crate::pic::init();
-    crate::pit::init();
+    crate::kernel::arch::x86::pic::init();
+    crate::kernel::arch::x86::pit::init();
     interrupts::enable();
     serial::write_str("PIC / PIT initialized; PIT 100 Hz; timer enabled\n");
 
