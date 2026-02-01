@@ -28,7 +28,6 @@ pub fn init() {
         
         serial::write_str("Loading IDT...\n");
         idt.load();
-        serial::write_str("IDT loaded\n");
     }
 }
 
