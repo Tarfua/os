@@ -28,6 +28,8 @@ fn kernel_main(boot_info: &'static mut bootloader_api::BootInfo) -> ! {
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
+    x86_64::instructions::interrupts::disable();
+
     crate::serial::write_str("KERNEL PANIC: ");
     if let Some(location) = info.location() {
         crate::serial::write_fmt(format_args!(
@@ -36,6 +38,7 @@ fn panic(info: &PanicInfo) -> ! {
             location.line()
         ));
     }
+
     loop {
         x86_64::instructions::hlt();
     }
